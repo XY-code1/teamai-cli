@@ -452,6 +452,31 @@ describe('reviewBranchDir — scorers', () => {
     ]);
   });
 
+  it('fails a workflow step that lists a scorer the branch does not have', async () => {
+    await writeScorer(repoDir, 'quality.md', VALID_SCORER);
+    await writeWorkflow(repoDir, 'ship', [
+      'schemaVersion: v1alpha1',
+      'name: ship',
+      'description: Ship it.',
+      'steps:',
+      '  - id: plan',
+      '    prompt: Plan it.',
+      '    scorers: [quality, nope]',
+    ].join('\n'));
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.ok).toBe(false);
+    expect(review.findings).toEqual([
+      {
+        level: 'fail',
+        check: 'workflows',
+        path: 'workflows/ship.yaml',
+        message: 'workflows/ship.yaml: step "plan" lists scorer "nope", which has no valid scorers/nope.md; the step runs without it',
+      },
+    ]);
+  });
+
   it('fails a malformed namespaced scorer of a team with a projects manifest', async () => {
     await fse.outputFile(path.join(repoDir, 'manifest', 'projects.yaml'), 'version: 1\nprojects:\n  - id: svc-a\n    name: Svc A\n    resources: { skills: [] }\n');
     await writeScorer(repoDir, 'svc-a/quality.md', VALID_SCORER.replace('passingScore: 1', 'passingScore: high'));
@@ -474,6 +499,17 @@ describe('reviewBranchDir — scorers', () => {
       { check: 'leaks', file: 'scorers/quality.md', message: 'scorers/quality.md looks like it carries a credential' },
       { check: 'leaks', file: 'scorers/README.md', message: 'scorers/README.md contains an internal address' },
     ]);
+  });
+
+  it('passes one scorer name in two role namespaces that a step lists', async () => {
+    await fse.outputFile(path.join(repoDir, 'manifest', 'roles.yaml'), 'version: 1\nroles:\n  - id: dev\n    resources: { knowledge: [], skills: [] }\n  - id: ops\n    resources: { knowledge: [], skills: [] }\n');
+    await writeScorer(repoDir, 'dev/quality.md', VALID_SCORER);
+    await writeScorer(repoDir, 'ops/quality.md', VALID_SCORER);
+    await writeWorkflow(repoDir, 'ship', 'schemaVersion: v1alpha1\nname: ship\ndescription: Ship it.\nsteps:\n  - id: plan\n    prompt: Plan it.\n    scorers: [quality]\n');
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.findings).toEqual([]);
   });
 });
 

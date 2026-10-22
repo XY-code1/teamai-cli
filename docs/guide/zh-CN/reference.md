@@ -56,6 +56,9 @@ sharing:
         secret: my-signing-key
         timeout: 5000
         retries: 3
+
+scoring:
+  batch: false               # true：步骤的评分器共用一次评审调用，除非步骤或工作流另有设置
 ```
 
 ### config.yaml（本地配置）

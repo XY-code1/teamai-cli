@@ -50,6 +50,8 @@ export interface WorkflowStep {
   agent?: string;
   /** The model a prompt step runs on, as written: an alias from `models/aliases.yaml` or a model name. The driver resolves it. */
   model?: string;
+  /** The scorers that judge this prompt or workflow step's succeeded passes. */
+  scorers?: StepScorers;
   output?: OutputSchema;
   /** Variables a command step receives, as written; `{{ inputs.… }}` and `{{ steps.… }}` render when the step is leased. */
   env?: Record<string, string>;
@@ -132,6 +134,14 @@ export interface InlineWorkflow {
 export interface WorkflowDefaults {
   /** The model of a prompt step whose step and definition choose none, as written. */
   model?: string;
+  /** Whether a step's scorers share one judge call when the step does not say. */
+  scorers?: { batch: boolean };
+}
+
+/** `scorers: [a, b]`, or `scorers: { names: [a, b], batch: true }`. Each name is a file in `scorers/`. */
+export interface StepScorers {
+  names: string[];
+  batch?: boolean;
 }
 
 export interface WorkflowDefinition {

@@ -35,6 +35,26 @@ A prompt step can set `model`: an alias from `models/aliases.yaml` or a model na
 
 A step's `model` replaces the agent's model and effort, and keeps its other settings. A model name that is not an alias runs at the tool's default effort. A workflow file that another runs uses its own `defaults.model`, else the one in effect for the step that runs it. An inline workflow uses the enclosing one. When the alias has no model for the step's tool, or the member's `~/.teamai/models/aliases.yaml` turns it off, the step fails with `model_unavailable` before the tool starts. On OpenCode 1, so does a step whose `model` is its agent's own model with no effort while the agent file sets `variant` and a `mode` other than `subagent`, since OpenCode 1 would apply that variant. OpenCode 2 does not take the model or variant from the agent file, and OpenCode 1 does not start a subagent with `opencode run --agent`, so the driver passes the definition's own model and variant on the command line. For an agent file with `mode: subagent`, which pull writes by default, OpenCode 1 gets the agent's instructions in the prompt, and the driver warns about the file settings that then do not apply. A lease carries `model` and `defaultModel` as written, and the driver resolves them.
 
+A prompt or workflow step can list [scorers](scorers.md) that judge its succeeded passes:
+
+```yaml
+schemaVersion: v1alpha1
+name: ship
+description: Implement the change, then review it.
+defaults:
+  scorers: { batch: true }
+steps:
+  - id: implement
+    prompt: Implement the change.
+    scorers: [review-quality]
+  - id: review
+    needs: [implement]
+    prompt: Review the change.
+    scorers: { names: [review-quality], batch: false }
+```
+
+With `batch: true`, one judge call takes a step's scorers together. A step's `batch` wins over `defaults.scorers.batch`, which wins over `scoring.batch` in `teamai.yaml`. A name with no valid `scorers/<name>.md` fails `teamai review --branch`; `teamai pull` warns and the step runs without it. An older teamai does not know `scorers`, so update every member and runner before a workflow they run lists one.
+
 Every step after the first lists the steps it waits for in `needs`. `needs: []` starts another branch with no dependency. Each `next` leases the first step in the file whose needs are done. `--driver local` runs one step at a time unless `workflows.max_parallel` is above 1. A step is skipped when a step it needs failed, or when every step it needs was skipped. A skipped step never runs. A failure does not stop other branches. When nothing is left to run, the run ends `failed` if any step failed, otherwise `succeeded`. A missing `needs`, a `needs` id that is not a step, or a cycle makes the file invalid. A missing `needs` also leaves the workflow with nothing to run, even when an older version was valid.
 
 A step can carry an `if` expression. When it is false, the step is skipped, and that does not fail the run. An expression reads `steps.<id>.outcome` (`success`, `failed`, or `skipped`) and `steps.<id>.outputs.<field>`, only for steps it needs, directly or through their needs. It has `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, parentheses, and the literals `'text'`, numbers, `true`, `false`, `null`, and `[]`. A path can index an array, as in `steps.review.outputs.files[0]`. The functions `length`, `any`, `all`, and `filter` read arrays. A missing value reads as `null`. `false`, `null`, `0`, and `''` are false; everything else is true. `==` is strict and compares whole values: `'1' == 1` and `'Build' == 'build'` are false.

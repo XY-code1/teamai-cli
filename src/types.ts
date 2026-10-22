@@ -725,6 +725,11 @@ export const TeamaiConfigBaseSchema = z.object({
      */
     postDeploy: TeamScriptSchema.optional(),
   }).optional(),
+  /** How the team's scorers run. A value this teamai cannot read is dropped, so it never fails the whole file. */
+  scoring: z.object({
+    /** Whether a step's scorers share one judge call when neither the step nor its workflow says. */
+    batch: z.boolean().optional().catch(undefined),
+  }).optional().catch(undefined),
   // MCP paths are only set for tools whose config location has been verified.
   // A team's `toolPaths` section merges over the built-in defaults tool by tool (#1185):
   // each tool named in the team config overrides that tool's default entry whole,

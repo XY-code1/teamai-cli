@@ -31,6 +31,27 @@ export interface SyncWorkflowResult {
   unrunnable: string[];
   /** The scorers of the same tree, synced first. */
   scorers: SyncScorerResult;
+  /** Scorers a step lists that `scorers` has no valid version of. The workflow still runs; the step runs without them. */
+  unknownScorers: UnknownScorer[];
+}
+
+export interface UnknownScorer {
+  file: string;
+  /** The step's path, such as `check.review`. */
+  step: string;
+  scorer: string;
+}
+
+export function formatUnknownScorer({ file, step, scorer }: UnknownScorer): string {
+  return `${file}: step "${step}" lists scorer "${scorer}", which has no valid scorers/${scorer}.md; the step runs without it`;
+}
+
+/** The scorers a definition's steps list, including inside its inline workflows, with each step's path. */
+function scorersListedBy(definition: { steps: WorkflowStep[] }, prefix = ''): Array<{ step: string; scorer: string }> {
+  return definition.steps.flatMap((step) => [
+    ...(step.scorers?.names ?? []).map((scorer) => ({ step: `${prefix}${step.id}`, scorer })),
+    ...(typeof step.workflow === 'object' ? scorersListedBy(step.workflow, `${prefix}${step.id}.`) : []),
+  ]);
 }
 
 /** One version of a file, as its reference checks read it: this revision, or the copy the cache keeps. */
@@ -130,7 +151,7 @@ export async function syncWorkflowDefinitions(
   options: SyncWorkflowOptions = {},
 ): Promise<SyncWorkflowResult> {
   const scorers = await syncScorerDefinitions(config, options);
-  const result: SyncWorkflowResult = { cached: [], kept: [], invalid: [], unrunnable: [], scorers };
+  const result: SyncWorkflowResult = { cached: [], kept: [], invalid: [], unrunnable: [], scorers, unknownScorers: [] };
   const dir = path.join(getKnowledgeDir(config), 'workflows');
   const knowledgeRoot = getKnowledgeDir(config);
   // Asked on the first valid file: a team without workflows starts no git here.
@@ -231,6 +252,14 @@ export async function syncWorkflowDefinitions(
     wrote += 1;
   }
   if (!options.dryRun) await dropUnsettled(config, new Set([...result.cached, ...result.kept]));
+  const valid = new Set(scorers.cached);
+  for (const file of checked) {
+    const definition = settle(file.stem).definition;
+    for (const { step, scorer } of definition ? scorersListedBy(definition) : []) {
+      if (!valid.has(scorer)) result.unknownScorers.push({ file: file.relativePath, step, scorer });
+    }
+  }
+  for (const unknown of result.unknownScorers) log.warn(`[workflows] ${formatUnknownScorer(unknown)}`);
 
   const scope = options.scopeLabel ?? config.scope;
   if (options.dryRun && result.cached.length > 0) {

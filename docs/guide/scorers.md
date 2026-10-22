@@ -42,3 +42,5 @@ roles:
 ```
 
 It replaces a root scorer of the same name. One name in two active namespaces is an error. A team without roles or projects gets every namespace.
+
+A workflow step lists the scorers that judge it, as `scorers: [review-quality]`. [Workflows](workflow.md) shows the full key.

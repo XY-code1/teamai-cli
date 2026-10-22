@@ -41,7 +41,7 @@ import { listFilesRecursive, pathExists, readFileIfExists, writeFile, ensureDir 
 import { getFileContentAtRev, getHeadCommit, listTreeAtRev } from './utils/git.js';
 import { isSilent, log, setSilent } from './utils/logger.js';
 import { redact } from './utils/redact.js';
-import { syncWorkflowDefinitions } from './workflow/cache.js';
+import { formatUnknownScorer, syncWorkflowDefinitions } from './workflow/cache.js';
 import { formatDiagnostic } from './workflow/parse.js';
 import { formatScorerDiagnostic } from './scorers/definition.js';
 
@@ -436,7 +436,7 @@ function reviewTreeConfig(repoDir: string, dataHome: string): LocalConfig {
   return { ...parsed, dataHome };
 }
 
-/** Invalid workflow and scorer files. Dry-run, so the call does not write a cache. */
+/** Invalid workflow and scorer files, and scorers a step lists that do not exist. Dry-run, so the call does not write a cache. */
 async function workflowFindings(repoDir: string): Promise<Finding[]> {
   const dataHome = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-review-workflows-'));
   const wasSilent = isSilent();
@@ -459,6 +459,13 @@ async function workflowFindings(repoDir: string): Promise<Finding[]> {
         check: 'workflows',
         path: diagnostic.file,
         message: formatDiagnostic(diagnostic),
+      })),
+      // Pull runs such a step without the scorer; a branch under review should not ship the gap.
+      ...result.unknownScorers.map((unknown): Finding => ({
+        level: 'fail',
+        check: 'workflows',
+        path: unknown.file,
+        message: formatUnknownScorer(unknown),
       })),
     ];
   } finally {

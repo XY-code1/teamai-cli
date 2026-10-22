@@ -56,6 +56,9 @@ sharing:
         secret: my-signing-key
         timeout: 5000
         retries: 3
+
+scoring:
+  batch: false               # true: a step's scorers share one judge call, unless the step or workflow says otherwise
 ```
 
 ### config.yaml (local config)

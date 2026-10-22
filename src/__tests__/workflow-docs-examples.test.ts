@@ -7,7 +7,7 @@ import { parseDocument } from 'yaml';
 import { syncScorerDefinitions } from '../scorers/cache.js';
 import { formatScorerDiagnostic } from '../scorers/definition.js';
 import type { LocalConfig } from '../types.js';
-import { syncWorkflowDefinitions } from '../workflow/cache.js';
+import { formatUnknownScorer, syncWorkflowDefinitions } from '../workflow/cache.js';
 import { leaseNext, reportAttempt, startRun } from '../workflow/engine.js';
 import { formatDiagnostic } from '../workflow/parse.js';
 import type { DriverIdentity, WorkflowEnvelope } from '../workflow/types.js';
@@ -201,7 +201,13 @@ describe('workflow guide examples', () => {
 
     // An example may be invalid only to show a failure: the page prints its exact diagnostic as review output.
     const shown = new Set([...fs.readFileSync(path.join(ROOT, page), 'utf8').matchAll(/^\s*✖ \[workflows\] (.+)$/gm)].map((match) => match[1] ?? ''));
+    // The scorers a workflow example lists are the ones the scorer pages show.
+    for (const example of SCORER_PAGES.flatMap(scorerExamplesOf)) {
+      fs.mkdirSync(path.join(config.repo.localPath, 'scorers'), { recursive: true });
+      fs.writeFileSync(path.join(config.repo.localPath, example.file), example.source);
+    }
     const result = await syncWorkflowDefinitions(config, { dryRun: true });
+    for (const unknown of result.unknownScorers) failures.push(`${byFile.get(unknown.file) ?? page}: ${formatUnknownScorer(unknown)}`);
     const reported = new Set(result.invalid.map(formatDiagnostic));
     const shownInvalid = new Set(result.invalid.filter((diagnostic) => shown.has(formatDiagnostic(diagnostic))).map((diagnostic) => diagnostic.file));
     for (const diagnostic of result.invalid.filter((diagnostic) => !shown.has(formatDiagnostic(diagnostic)))) {

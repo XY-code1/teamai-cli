@@ -41,6 +41,8 @@ vi.mock('../utils/logger.js', () => ({
         debug: vi.fn(),
     },
     setStderrOnly: vi.fn(),
+    isSilent: () => false,
+    setSilent: vi.fn(),
 }));
 
 // This suite isolates hook/config checks from disk delivery. Docs now compare

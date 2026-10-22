@@ -35,6 +35,26 @@ steps:
 
 步骤的 `model` 替换 agent 的模型和推理强度（effort），保留其他设置。不是别名的模型名使用工具默认的推理强度。被另一个工作流运行的工作流文件使用自己的 `defaults.model`，没有时使用运行它的步骤所在处生效的那个。内联工作流使用外层的。别名没有该步骤工具的模型，或成员的 `~/.teamai/models/aliases.yaml` 关闭了它时，步骤会在工具启动前以 `model_unavailable` 失败。在 OpenCode 1 上，步骤的 `model` 是其 agent 自己的模型且没有推理强度、而 agent 文件设置了 `variant` 且 `mode` 不是 `subagent` 时，也会这样失败，因为 OpenCode 1 会套用那个 variant。OpenCode 2 不从 agent 文件读取模型和 variant，OpenCode 1 的 `opencode run --agent` 也不会启动 subagent，所以驱动在命令行上传入定义自己的模型和 variant。对 `mode: subagent` 的 agent 文件（pull 默认这样写），OpenCode 1 从提示词中获得 agent 的指令，驱动会对此时不生效的文件设置发出警告。租约原样携带 `model` 和 `defaultModel`，由驱动解析。
 
+提示词步骤或工作流步骤可以列出[评分器](scorers.md)，用来评判它成功的执行：
+
+```yaml
+schemaVersion: v1alpha1
+name: ship
+description: Implement the change, then review it.
+defaults:
+  scorers: { batch: true }
+steps:
+  - id: implement
+    prompt: Implement the change.
+    scorers: [review-quality]
+  - id: review
+    needs: [implement]
+    prompt: Review the change.
+    scorers: { names: [review-quality], batch: false }
+```
+
+`batch: true` 时，一次评审调用同时处理一个步骤的所有评分器。步骤的 `batch` 优先于 `defaults.scorers.batch`，后者优先于 `teamai.yaml` 里的 `scoring.batch`。没有有效 `scorers/<name>.md` 的名字会让 `teamai review --branch` 失败；`teamai pull` 会警告，步骤照常运行，只是不用这个评分器。旧版 teamai 不认识 `scorers`，所以在成员和运行器要运行的工作流列出评分器之前，先更新他们的 teamai。
+
 第一个步骤之后的每个步骤都要用 `needs` 列出它等待的步骤。`needs: []` 表示另起一个没有依赖的分支。每次 `next` 租出文件中第一个依赖都已完成的步骤。`--driver local` 一次运行一个步骤，除非 `workflows.max_parallel` 大于 1。某个依赖失败，或所有依赖都被跳过时，该步骤会被跳过。被跳过的步骤不会运行。一个步骤失败不会停止其他分支。没有可运行的步骤时，只要有步骤失败，运行结果就是 `failed`，否则是 `succeeded`。缺少 `needs`、`needs` 中的 id 不是本工作流的步骤，或依赖成环，都会让该文件无效。缺少 `needs` 时，即使之前有有效版本，该工作流也没有可运行版本。
 
 步骤可以带 `if` 表达式。表达式为假时跳过该步骤，这不会让运行失败。表达式可以读取 `steps.<id>.outcome`（`success`、`failed` 或 `skipped`）和 `steps.<id>.outputs.<field>`，且只能读取该步骤直接或间接依赖的步骤。可用 `==`、`!=`、`<`、`<=`、`>`、`>=`、`&&`、`||`、`!`、括号，以及字面量 `'text'`、数字、`true`、`false`、`null` 和 `[]`。路径可以用下标读取数组元素，例如 `steps.review.outputs.files[0]`。函数 `length`、`any`、`all` 和 `filter` 读取数组。不存在的值读作 `null`。`false`、`null`、`0` 和 `''` 为假，其他值都为真。`==` 是严格比较，并比较整个值：`'1' == 1` 和 `'Build' == 'build'` 都为假。

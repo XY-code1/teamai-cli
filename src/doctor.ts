@@ -861,6 +861,7 @@ export async function doctor(options: DoctorOptions): Promise<boolean> {
   // how each alias agent's model resolved in each tool (#830).
   const { ruleChannelNotes } = await import('./resources/rules.js');
   const { dshSandboxNote } = await import('./dsh-hooks.js');
+  const { scorerNotes } = await import('./doctor-scorers.js');
   const notes = [
     ...await buildNamespaceNotes(ctx),
     ...await entryNamespaceNotes(ctx),
@@ -868,6 +869,8 @@ export async function doctor(options: DoctorOptions): Promise<boolean> {
     ...ctx.teamConfig ? await keptTeamHookEntries(ctx.teamConfig, localConfig) : [],
     ...await aliasNamespaceNotes(ctx),
     ...await agentModelNotes(ctx),
+    // Invalid scorer files and scorers a workflow step lists without one, which a silent hook pull never shows.
+    ...await scorerNotes(localConfig),
     ...(await envAdvisories(localConfig, ctx.teamConfig, ctx.teamEnv)).map(describeEnvAdvisory),
     // A team MCP server a tool cannot use over its transport.
     ...await mcpTransportNotes(ctx),
