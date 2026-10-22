@@ -28,11 +28,11 @@ Judge whether the change does what the step asked. Read the diff and the session
 |---|---|
 | `labels` | 2 到 20 个 `{ value, score, description }`。至少一个分数不低于 `passingScore`，至少一个低于它。 |
 | `passingScore` | 标签分数不低于它即为通过。 |
-| `samplingRate`、`model`、`isolation` | 可选。被评判的步骤执行比例，0 到 100，默认 25。评审者使用的模型别名或模型名，默认用工具自己的模型。`verified` 或 `best-effort`。 |
+| `samplingRate`、`model`、`isolation` | 可选。被评判的步骤执行比例，0 到 100，默认 25。评审者的模型：团队[模型别名](sharing.md#模型别名)，按评审工具分别解析；或模型名，原样交给第一个评审工具。默认用工具自己的模型。`verified` 或 `best-effort`。 |
 
-frontmatter 之后的文本是评审者的提示词。`teamai pull` 缓存有效的评分器，并对其余文件给出警告。`teamai review --branch` 遇到格式错误的评分器，或 `scorers/` 里除 `<name>.md`、`<namespace>/<name>.md` 和 `README.md` 以外的文件时会失败。
+frontmatter 之后的文本是评审者的提示词。`teamai pull` 缓存有效的评分器（`teamai status` 会列出它们），并对其余文件给出警告。`teamai review --branch` 遇到格式错误的评分器、分支的 `models/aliases.yaml` 没有为任何工具映射的模型别名、`scorers/` 里除 `<name>.md`、`<namespace>/<name>.md` 和 `README.md` 以外的文件，或其中任何文件含有凭据或内网地址时会失败，与规则的检查相同。
 
-`scorers/ops/review-quality.md` 属于 `ops` 命名空间。成员的角色或项目列出它时才会拿到：
+`scorers/ops/review-quality.md` 属于 `ops` 命名空间。等角色和项目支持 `scorers` 键后，成员的角色或项目列出它时才会拿到：
 
 ```yaml
 # manifest/roles.yaml
@@ -43,7 +43,105 @@ roles:
 
 它会替换根目录下同名的评分器。同一个名字出现在两个生效的命名空间里会报错。没有角色也没有项目的团队会拿到所有命名空间。
 
-工作流步骤用 `scorers: [review-quality]` 列出评判它的评分器。完整写法见[工作流](workflow.md)。
+## 选择评审者的模型
+
+```yaml
+# scorers/review-quality.md 的 frontmatter 中
+model: fast
+```
+
+```yaml
+# models/aliases.yaml
+aliases:
+  fast:
+    claude: haiku
+```
+
+评审工具按顺序尝试，第一个条目给出模型的工具负责评审。没有工具给出模型时，`score --next` 把该评审任务列在 `skipped` 下并说明原因，任务保持打开，留给工具能运行该模型的 driver；`teamai doctor` 会对该评分器给出警告。成员为该工具写的 `~` 条目让它使用工具默认模型。启用的 `teamai models switch` 也一样，但 Claude 会保留 `opus`、`sonnet` 或 `haiku`，经切换路由；切换还会丢弃别名的 effort。CodeBuddy 评审者不使用别名的 effort。
+
+每个标签记录由谁评审：
+
+```json
+"judge":{"kind":"model","tool":"claude","model":{"requested":"haiku","reported":"claude-haiku-4-5","alias":"fast"},"isolation":"verified","access":"read"}
+```
+
+`requested` 是评审者启动时使用的模型；对 driver 自己的评审者，是租约指定的模型。`reported` 是工具报告的模型，或提交中的 `judge.model`。工具默认模型评审时 `alias` 仍会保留。别名设置了 effort 时还会有 `"effort":{"requested":"low"}`。
+
+## 为步骤评分
+
+```yaml
+# workflows/review-and-fix.yaml
+steps:
+  - id: review
+    prompt: Review the change.
+    scorers: [review-quality]
+```
+
+没有有效 `scorers/<name>.md` 的名字会让 `teamai review --branch` 失败；`teamai pull` 会警告，步骤照常运行，只是不用这个评分器。旧版 teamai 不认识 `scorers`，所以先更新所有成员和运行器。完整写法见[工作流](workflow.md)。
+
+## 一次运行和它的评审
+
+```console
+$ teamai workflow start review-and-fix --driver local     # 运行照常结束，评审从不阻塞它
+$ teamai score --next --json '{"driver":{"kind":"local","machine":"m1","workspace":"/work","can":{"judge":{"isolation":"verified","tools":["claude"]}}}}'
+{"data":{"lease":{"ref":"s5d1e07c2a9b4/a91c0d7e","subject":{"runId":"r3f9…","step":"review","pass":1},
+  "evidence":"…/scores/evidence/a91c0d7e/","prompt":"…/prompt.md","answer":{"schema":{…}},
+  "submit":"teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin"}}}
+$ teamai score --lease s5d1e07c2a9b4/a91c0d7e --json '{"driver":{"kind":"local","machine":"m1","workspace":"/work"}}'
+{"data":{"label":{"scorer":"review-quality","label":"good","score":1,"passed":true,…},"published":true}}
+```
+
+`samplingRate` 决定评判哪些成功的执行轮次，在每台机器上结果相同。`workflow next` 从不分发评审任务。`--lease <ref>` 在本机用租约选定的工具、以[受限配置](#隔离)评判，并像任意 driver 的答案一样结算租约。评审失败时租约保持打开。
+
+证据目录包含 `evidence.json`、`prompt.md`、有记录范围时的 `diff.patch`、`repo/`（被评判提交中的跟踪文件，符号链接的目标以文本保存）、`transcripts/`（包含可读取的子代理）和 `outputs.json`。所有文件都经过脱敏，团队在 `env/secrets.yaml` 中声明的密钥值也会被遮蔽。不是文本的跟踪文件不会写入，并列在 `omitted` 里。缺失证据以 gap 代码列出。租约结算或过期后删除证据。
+
+## 任意 driver
+
+driver 用自己的评审者处理 `prompt.md`，只允许它读取证据目录，然后提交答案：
+
+```console
+$ teamai score --next --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work","can":{"judge":{"isolation":"verified","access":"read","tools":["claude"]}}},"running":[]}'
+$ teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin <<'JSON'
+{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
+ "answer":{"label":"good","reasoning":"…"},"judge":{"tool":"claude"}}
+JSON
+{"data":{"label":{"scorer":"review-quality","label":"good","score":1,"passed":true,…},"published":true}}
+```
+
+| `can.judge` | 含义 |
+|---|---|
+| `isolation` | `verified` 或 `best-effort`。只租出它满足[所需级别](#隔离)的任务。 |
+| `access` | 评审者能做什么：`answer`（不用工具）、`read`（读取证据）或 `full`（任意工具，默认值）。标签会记录该值。 |
+| `tools` | 按你的偏好排序。首个能解析评分器模型的工具胜出。 |
+
+评分器未列出的标签会被拒绝，租约保持打开。`running` 列出你仍在评判的租约，从而续期；租约在领取或续期 30 分钟后过期。不要把评审租约放进 `workflow next` 的 `running`。所有字段见 `teamai score --help`。
+
+## 按需评分
+
+```console
+$ teamai score --run r3f9… --step review --scorer review-quality                     # 在本机评判最近一次成功的执行
+$ teamai score --run r3f9… --step review --pass 2 --scorer review-quality --queue     # 交给任意 driver 的 --next
+```
+
+不应用抽样，失败或过期的评审任务会重新打开。运行固定过的评分器使用固定的评分标准；`teamai pull` 缓存的其他评分器使用当前版本。不加 `--queue` 时，运行 PATH 上首个可用的评审工具，优先使用执行该轮的工具。未知的运行、步骤、执行轮次或评分器会失败，并列出存在的值。若本机没有评审工具能运行某个评分器的模型，该评分器以 `judge_model_unavailable` 失败并保持打开。错误的 `labels` 列出其他评分器已生成的标签。
+
+## 批量评审
+
+```yaml
+steps:
+  - id: review
+    prompt: Review the change.
+    scorers: { names: [review-quality, test-coverage], batch: true }
+```
+
+同一轮中解析到相同工具和模型的评分器共用一个租约、一个证据目录和一个提示。租约列出 `scorers` 并带有 `batched: true`，答案为每个评分器给出一个标签：
+
+```json
+{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
+ "answer":{"review-quality":{"label":"good","reasoning":"…"},"test-coverage":{"label":"thin","reasoning":"…"}}}
+```
+
+步骤的 `batch` 优先于工作流的 `defaults.scorers.batch`，后者优先于 `teamai.yaml` 里的 `scoring.batch`。`--batch` 对 `--run` 起同样作用。每个标签记录 `judge.batched: true`。只要有一个标签不在对应评分器的列表中，整个答案都会被拒绝，租约保持打开。
 
 ## 隔离
 
@@ -53,60 +151,33 @@ scoring:
   isolation: verified
 ```
 
-团队的 `scoring.isolation`、评分器的 `isolation`，以及本作用域 `config.yaml` 中的 `scoring.isolation` 都可以要求 `verified`。取最严格的一项；默认是 `best-effort`。teamai 不认识的值按 `verified` 处理，并给出警告。`teamai score --next` 只把工作租给 `can.judge.isolation` 满足要求的 driver，本机评判也拒绝配置级别低于要求的工具。`teamai doctor` 打印该级别及其来源：
+团队的 `scoring.isolation`、评分器的 `isolation`，以及本作用域 `config.yaml` 中的 `scoring.isolation` 都可以要求 `verified`。取最严格的一项；默认是 `best-effort`。teamai 不认识的值按 `verified` 处理，并给出警告。`teamai doctor` 打印该级别、其来源、要求更高级别的评分器，以及本机每个评审工具能达到的级别：
 
 ```text
 Scoring isolation: verified, set by teamai.yaml scoring.isolation.
+Scoring isolation: best-effort, the default. scorers/ops/review-quality.md asks for verified for its own work.
+Judge tools here: claude 2.1.308 (Claude Code) is verified, codebuddy 2.3.0 is best-effort.
 ```
 
-## 任意驱动评审
+本机评审为每个工具使用各自的配置：
 
-运行结束时不等待评审。之后任意驱动都可以领取评审任务，并提交它自己的评审结果：
+| 工具 | 级别 | `access` | 配置 |
+|---|---|---|---|
+| Claude Code 2.1.308 | `verified` | `read` | `--restricted`，只开放 Read、Grep 和 Glob，不加载 MCP，不保存会话。 |
+| codex-cli 0.163.0 | `verified` | `read` | 临时主目录，其权限配置只允许 shell 读取证据，禁止网络和写入。 |
+| OpenCode v2.1.2 | 不在任何 git 或 hg 检出内时为 `verified`，否则 `best-effort` | `read` | standalone 模式，使用独立的配置、数据库和数据目录；禁止命令、编辑、网页和目录外访问；读取结果后删除评判会话。 |
+| CodeBuddy | `best-effort` | `full` | 只读工具，不加载 MCP，不保存会话。无论 `--tools` 如何设置，它都会列出约 70 个工具。未登录时以 `judge_tool_unavailable` 失败。 |
+| 其他版本 | `best-effort` | 同上 | 相同配置，未经验证。 |
 
-```console
-$ teamai score --next --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work","can":{"judge":{"isolation":"verified","access":"read","tools":["claude"]}}},"running":[]}'
-{"data":{"lease":{"ref":"s5d1e07c2a9b4/a91c0d7e","subject":{"runId":"r3f9…","step":"review","pass":1},
-  "prompt":"…/prompt.md","answer":{"schema":{…}},"submit":"teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin"}}}
-$ teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin <<'JSON'
-{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
- "answer":{"label":"good","reasoning":"…"},"judge":{"tool":"claude"}}
-JSON
-{"data":{"label":{"scorer":"review-quality","label":"good","score":1,"passed":true,…},"published":true}}
-```
+`best-effort` 工具不能评判要求 `verified` 的评分器。提示通过标准输入或文件传入。保留工具登录和受支持的模型切换设置。本机没有评审工具能运行评分器的模型时，评审任务保持打开，留给其他 driver，不改变工作流结果。由哪个工具评审见[选择评审者的模型](#选择评审者的模型)。
 
-`can.judge.access` 说明你的评审能做什么：`answer`（不用工具）、`read`（读取证据）或 `full`（任意工具，默认值）。它的标签会记录该值。评分器未列出的标签会被拒绝，租约保持打开。`workflow next` 从不分发评审任务。所有字段见 `teamai score --help`。
-
-使用 `scorers: { names: [review-quality, test-coverage], batch: true }` 时，同一轮中解析到相同工具和模型的评分器共用一个租约、一个证据目录和一个提示。租约列出 `scorers` 并带有 `batched: true`，答案为每个评分器给出一个标签：
-
-```json
-{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
- "answer":{"review-quality":{"label":"good","reasoning":"…"},"test-coverage":{"label":"thin","reasoning":"…"}}}
-```
-
-每个标签记录 `judge.batched: true`。只要有一个标签不在对应评分器的列表中，整个答案都会被拒绝，租约保持打开。
-
-标签存放位置：
+## 标签存放位置
 
 | 路径 | 内容 |
 |---|---|
 | `<dataHome>/scores/labels.jsonl` | 本机的所有标签。 |
 | `<dataHome>/scores/reasoning/` | 评审者的理由，每个标签一个文件。从不发布。 |
+| `<dataHome>/scores/raw/` | 本机评审失败时的输出，保留到之后的评审尝试取代它。 |
 | `teamai-reports` 上的 `scores/<member>/<YYYY-MM>.jsonl` | 已发布的标签，每个评分器、评分标准、执行轮次和评审类型只保留最新一条。推送成功前标签留在 `<dataHome>/scores/pending/`；关闭用量上报时一直留在那里。 |
 
-工作流运行页面显示每一轮的标签，以及评审开销，与运行本身的 token 分开统计。本机的运行统计每一次评审尝试；成员发布的运行只统计产生了标签的评审。
-
-`score --next` 准备 `evidence.json`、`prompt.md`、有记录范围时的 `diff.patch`、`repo/`、`transcripts/` 和 `outputs.json`。仓库包含被评判提交中的跟踪文件，符号链接的目标以文本保存。会话记录包含可读取的子代理并经过脱敏。缺失证据以 gap 代码列出。租约结算或过期后删除证据。
-
-## 在本机评判
-
-```sh
-teamai score --lease "$REF" --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work"}}'
-```
-
-该命令运行租约选定的工具，并通过所有 driver 共用的提交路径记录标签。运行失败时租约保持开放。
-
-Claude 使用受限的读取配置。Codex 使用临时主目录，其权限配置只允许 shell 读取证据，禁止网络和写入。OpenCode 以 standalone 模式运行，使用独立的配置、数据库和数据目录，不读取项目配置，禁止命令、编辑、网页和目录外访问；读取结果后删除评判会话及其子会话。CodeBuddy 只开放只读工具，不加载 MCP，不保存会话；它没有受限模式，因此保持 `best-effort`；未登录的 CodeBuddy 以 `judge_tool_unavailable` 失败。Claude、Codex 和 OpenCode 的标签记录 `access: read`，CodeBuddy 记录 `access: full`，因为无论 `--tools` 如何设置，它都会列出约 70 个工具。提示通过标准输入或文件传入。保留工具登录和受支持的模型切换设置。没有已验证配置的版本标记为 `best-effort`，不能评判要求 `verified` 的 scorer。
-
-对于 scorer 的模型别名，按声明顺序选用首个能解析它的工具。成员选定的本地默认值或启用的模型切换使用工具默认值。未映射或无法读取的别名以 `judge_model_unavailable` 关闭条目，不改变工作流结果。标签记录工具报告的模型；未报告时记录显式请求的具体模型。失败的评判输出仅保存在本机 `<dataHome>/scores/raw/`。
-
-已验证版本：Claude Code 2.1.308、codex-cli 0.163.0 和 OpenCode v2.1.2。只有评判所用的临时目录不在任何 git 或 hg 检出内时，OpenCode 才是 `verified`，因为在检出内它的文件工具可能读取整个检出。
+标签从不进入运行或它的记录。工作流运行页面显示每一轮的标签，以及评审开销，与运行本身的 token 分开统计。本机的运行统计每一次评审尝试；成员发布的运行只统计产生了标签的评审。

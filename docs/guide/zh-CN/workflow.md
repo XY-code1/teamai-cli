@@ -53,8 +53,6 @@ steps:
     scorers: { names: [review-quality], batch: false }
 ```
 
-`batch: true` 时，解析到相同工具和模型的评分器由一次评审调用同时处理。步骤的 `batch` 优先于 `defaults.scorers.batch`，后者优先于 `teamai.yaml` 里的 `scoring.batch`。没有有效 `scorers/<name>.md` 的名字会让 `teamai review --branch` 失败；`teamai pull` 会警告，步骤照常运行，只是不用这个评分器。旧版 teamai 不认识 `scorers`，所以在成员和运行器要运行的工作流列出评分器之前，先更新他们的 teamai。
-
 第一个步骤之后的每个步骤都要用 `needs` 列出它等待的步骤。`needs: []` 表示另起一个没有依赖的分支。每次 `next` 租出文件中第一个依赖都已完成的步骤。`--driver local` 一次运行一个步骤，除非 `workflows.max_parallel` 大于 1。某个依赖失败，或所有依赖都被跳过时，该步骤会被跳过。被跳过的步骤不会运行。一个步骤失败不会停止其他分支。没有可运行的步骤时，只要有步骤失败，运行结果就是 `failed`，否则是 `succeeded`。缺少 `needs`、`needs` 中的 id 不是本工作流的步骤，或依赖成环，都会让该文件无效。缺少 `needs` 时，即使之前有有效版本，该工作流也没有可运行版本。
 
 步骤可以带 `if` 表达式。表达式为假时跳过该步骤，这不会让运行失败。表达式可以读取 `steps.<id>.outcome`（`success`、`failed` 或 `skipped`）和 `steps.<id>.outputs.<field>`，且只能读取该步骤直接或间接依赖的步骤。可用 `==`、`!=`、`<`、`<=`、`>`、`>=`、`&&`、`||`、`!`、括号，以及字面量 `'text'`、数字、`true`、`false`、`null` 和 `[]`。路径可以用下标读取数组元素，例如 `steps.review.outputs.files[0]`。函数 `length`、`any`、`all` 和 `filter` 读取数组。不存在的值读作 `null`。`false`、`null`、`0` 和 `''` 为假，其他值都为真。`==` 是严格比较，并比较整个值：`'1' == 1` 和 `'Build' == 'build'` 都为假。
@@ -72,7 +70,7 @@ steps:
 
 `teamai pull` 和 `teamai push` 会检查每个文件，并按被运行工作流的可运行版本检查运行它的步骤。`prompt_file` 必须是团队仓库 `prompts/` 下的普通文件，不能是符号链接。校验时会把文件内容和工作流一起缓存，因此已经开始的运行会继续使用对应修订版，即使源文件后来被修改或删除。新修订版无效时，仍保留上一份有效缓存，前提是这份缓存仍与它运行的工作流相符。这一版 teamai 不认识的字段除外：该工作流没有可运行版本，需要先更新 teamai。
 
-`teamai review --branch <name>` 用同样的规则检查该分支。任一工作流文件无效时退出码为 1，不写入任何文件，也不运行工作流。下面这个文件过不了检查：
+`teamai review --branch <name>` 用同样的规则检查该分支。任一工作流文件无效，或步骤的 `model`、`defaults.model` 是分支的 `models/aliases.yaml` 没有为任何工具映射的别名时，退出码为 1。它不写入任何文件，也不运行工作流。下面这个文件过不了检查：
 
 ```yaml
 schemaVersion: v1alpha1

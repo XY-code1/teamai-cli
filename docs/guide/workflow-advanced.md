@@ -750,3 +750,11 @@ A driver that continues a [published run](#publish-and-claim) relies on these ru
 - After a claim, before it continues a workspace it has locally, the driver moves that branch forward to the commit the run recorded. It refuses, and moves nothing, when the local branch is ahead of that commit or has diverged from it, when its worktree has changes or is on another branch, or when a read-only step left it and it is not back. The local driver does this once per claim, before its first lease, and answers `branch_diverged` with what to do.
 - A workspace the claim brought in has no owner until a driver leases a step in it. That driver becomes its owner.
 - A lease another machine held in a step that opened its own workspace starts again as that step's next pass, on a new branch. The old branch stays on `origin` with whatever was pushed to it. That step asks its HITL question again. A lease in any other step is released and runs again in the same pass.
+
+## Judge work in your own driver
+
+```text
+teamai score --next --json '{"driver":{"kind":"script","machine":"runner","workspace":"/work","can":{"judge":{"isolation":"best-effort","tools":["claude"]}}},"running":[]}'
+```
+
+Judge work comes from `teamai score --next`, never from `workflow next`. See [Scorers](scorers.md#any-driver).

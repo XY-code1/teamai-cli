@@ -28,11 +28,11 @@ Judge whether the change does what the step asked. Read the diff and the session
 |---|---|
 | `labels` | 2 to 20 `{ value, score, description }`. At least one scores at or above `passingScore`, and one below it. |
 | `passingScore` | A label passes when its score is at or above this. |
-| `samplingRate`, `model`, `isolation` | Optional. Percent of passes judged, 0 to 100, default 25. The judge's model alias or name, default the tool's. `verified` or `best-effort`. |
+| `samplingRate`, `model`, `isolation` | Optional. Percent of passes judged, 0 to 100, default 25. The judge's model: a team [model alias](sharing.md#model-aliases), resolved per judge tool, or a model name, which goes unchanged to the first judge tool; default the tool's. `verified` or `best-effort`. |
 
-The text after the frontmatter is the judge's prompt. `teamai pull` caches valid scorers and warns about the rest. `teamai review --branch` fails on a malformed scorer and on any file in `scorers/` other than `<name>.md`, `<namespace>/<name>.md` and `README.md`.
+The text after the frontmatter is the judge's prompt. `teamai pull` caches valid scorers, which `teamai status` lists, and warns about the rest. `teamai review --branch` fails on a malformed scorer, on a model alias the branch's `models/aliases.yaml` maps for no tool, on any file in `scorers/` other than `<name>.md`, `<namespace>/<name>.md` and `README.md`, and on a credential or internal address in any file there, as it does for rules.
 
-`scorers/ops/review-quality.md` belongs to the `ops` namespace. Members get it when their role or project lists it:
+`scorers/ops/review-quality.md` belongs to the `ops` namespace. Once roles and projects accept a `scorers` key, members get it when their role or project lists it:
 
 ```yaml
 # manifest/roles.yaml
@@ -43,7 +43,105 @@ roles:
 
 It replaces a root scorer of the same name. One name in two active namespaces is an error. A team without roles or projects gets every namespace.
 
-A workflow step lists the scorers that judge it, as `scorers: [review-quality]`. [Workflows](workflow.md) shows the full key.
+## Choose the judge's model
+
+```yaml
+# scorers/review-quality.md, in the frontmatter
+model: fast
+```
+
+```yaml
+# models/aliases.yaml
+aliases:
+  fast:
+    claude: haiku
+```
+
+Judge tools are tried in order, and the first whose entry gives a model judges. When none does, `score --next` lists the work under `skipped` with the reason and leaves it open for a driver whose tools can, and `teamai doctor` warns about the scorer. A member's `~` entry for the tool sends it to the tool's default model. So does an active `teamai models switch`, except that Claude keeps `opus`, `sonnet` or `haiku` and routes it through the switch; a switch also drops the alias's effort. CodeBuddy judges run without the alias's effort.
+
+Each label records what judged:
+
+```json
+"judge":{"kind":"model","tool":"claude","model":{"requested":"haiku","reported":"claude-haiku-4-5","alias":"fast"},"isolation":"verified","access":"read"}
+```
+
+`requested` is the model the judge was launched with, or the one the lease named for a driver's judge. `reported` is the one the tool reports, or the submission's `judge.model`. `alias` stays when the tool default judges. An alias effort adds `"effort":{"requested":"low"}`.
+
+## Score a step
+
+```yaml
+# workflows/review-and-fix.yaml
+steps:
+  - id: review
+    prompt: Review the change.
+    scorers: [review-quality]
+```
+
+A name with no valid `scorers/<name>.md` fails `teamai review --branch`; `teamai pull` warns and the step runs without it. An older teamai does not know `scorers`, so update every member and runner first. [Workflows](workflow.md) shows the long form.
+
+## A run and its judge
+
+```console
+$ teamai workflow start review-and-fix --driver local     # the run settles; judging never holds it
+$ teamai score --next --json '{"driver":{"kind":"local","machine":"m1","workspace":"/work","can":{"judge":{"isolation":"verified","tools":["claude"]}}}}'
+{"data":{"lease":{"ref":"s5d1e07c2a9b4/a91c0d7e","subject":{"runId":"r3f9…","step":"review","pass":1},
+  "evidence":"…/scores/evidence/a91c0d7e/","prompt":"…/prompt.md","answer":{"schema":{…}},
+  "submit":"teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin"}}}
+$ teamai score --lease s5d1e07c2a9b4/a91c0d7e --json '{"driver":{"kind":"local","machine":"m1","workspace":"/work"}}'
+{"data":{"label":{"scorer":"review-quality","label":"good","score":1,"passed":true,…},"published":true}}
+```
+
+`samplingRate` picks the succeeded passes to judge, the same way on every machine. `workflow next` never hands out judge work. `--lease <ref>` judges here with the tool the lease names, in a [confined profile](#isolation), and settles the lease like any driver's answer. A failed judge leaves the lease open.
+
+The evidence directory holds `evidence.json`, `prompt.md`, `diff.patch` when a range was recorded, `repo/` (tracked files at the judged commit, symlink targets stored as text), `transcripts/` (with readable subagents) and `outputs.json`. Every file is redacted, including the values of the secrets the team declares in `env/secrets.yaml`. A tracked file that is not text is left out and listed under `omitted`. Missing evidence is listed as gap codes. It is removed when the lease settles or lapses.
+
+## Any driver
+
+A driver runs its own judge on `prompt.md`, with the evidence directory as its only readable root, and submits the answer:
+
+```console
+$ teamai score --next --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work","can":{"judge":{"isolation":"verified","access":"read","tools":["claude"]}}},"running":[]}'
+$ teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin <<'JSON'
+{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
+ "answer":{"label":"good","reasoning":"…"},"judge":{"tool":"claude"}}
+JSON
+{"data":{"label":{"scorer":"review-quality","label":"good","score":1,"passed":true,…},"published":true}}
+```
+
+| `can.judge` | Meaning |
+|---|---|
+| `isolation` | `verified` or `best-effort`. Only work whose [required level](#isolation) it meets is leased. |
+| `access` | What the judge can do: `answer` (no tools), `read` (reads the evidence) or `full` (any tool), the default. Labels record it. |
+| `tools` | In your order of preference. The first that resolves the scorer's model wins. |
+
+A label the scorer does not list is refused, and the lease stays open. `running` lists the refs you still judge, which renews them; a lease lapses 30 minutes after it was taken or renewed. Never list a judge ref in `workflow next`'s `running`. `teamai score --help` has every field.
+
+## On demand
+
+```console
+$ teamai score --run r3f9… --step review --scorer review-quality                     # judge the latest succeeded pass here
+$ teamai score --run r3f9… --step review --pass 2 --scorer review-quality --queue     # any driver's --next takes it
+```
+
+Sampling does not apply, and judge work that failed or expired opens again. A scorer the run pinned judges with that rubric; any other scorer `teamai pull` cached, with its current one. Without `--queue`, the first judge tool on PATH runs, preferring the tool that ran the pass. An unknown run, step, pass or scorer fails and lists the ones that exist. A scorer whose model no judge tool here runs fails `judge_model_unavailable` and stays open. The error's `labels` lists what the other scorers labelled.
+
+## Batching
+
+```yaml
+steps:
+  - id: review
+    prompt: Review the change.
+    scorers: { names: [review-quality, test-coverage], batch: true }
+```
+
+The scorers of one pass that resolve to the same tool and model share one lease, one evidence directory and one prompt. The lease lists `scorers` and `batched: true`, and the answer has one label per scorer:
+
+```json
+{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
+ "answer":{"review-quality":{"label":"good","reasoning":"…"},"test-coverage":{"label":"thin","reasoning":"…"}}}
+```
+
+A step's `batch` wins over the workflow's `defaults.scorers.batch`, which wins over `scoring.batch` in `teamai.yaml`. `--batch` does the same for `--run`. Each label records `judge.batched: true`. One label a scorer does not list refuses the whole answer, and the lease stays open.
 
 ## Isolation
 
@@ -53,60 +151,33 @@ scoring:
   isolation: verified
 ```
 
-The team's `scoring.isolation`, a scorer's `isolation`, and `scoring.isolation` in this scope's `config.yaml` may each ask for `verified`. The strictest wins; the default is `best-effort`. A value teamai does not know counts as `verified`, with a warning. `teamai score --next` leases work only to a driver whose `can.judge.isolation` meets it, and the local judge refuses a tool whose profile is below it. `teamai doctor` prints the level and what sets it:
+The team's `scoring.isolation`, a scorer's `isolation`, and `scoring.isolation` in this scope's `config.yaml` may each ask for `verified`. The strictest wins; the default is `best-effort`. A value teamai does not know counts as `verified`, with a warning. `teamai doctor` prints the level, what sets it, the scorers that ask for more, and the level each judge tool here reaches:
 
 ```text
 Scoring isolation: verified, set by teamai.yaml scoring.isolation.
+Scoring isolation: best-effort, the default. scorers/ops/review-quality.md asks for verified for its own work.
+Judge tools here: claude 2.1.308 (Claude Code) is verified, codebuddy 2.3.0 is best-effort.
 ```
 
-## Judge with any driver
+The local judge runs each tool in its own profile:
 
-A run settles without waiting for its judge. Any driver then takes the judge work and answers for its own judge:
+| Tool | Level | `access` | Profile |
+|---|---|---|---|
+| Claude Code 2.1.308 | `verified` | `read` | `--restricted`, Read, Grep and Glob only, no MCP, no saved session. |
+| codex-cli 0.163.0 | `verified` | `read` | A temporary home whose permission profile lets its shell read only the evidence, with no network and no writes. |
+| OpenCode v2.1.2 | `verified` outside any git or hg checkout, else `best-effort` | `read` | Standalone, with isolated settings, database and data dirs; command, edit, web and external-directory permissions denied; judge sessions deleted after reading. |
+| CodeBuddy | `best-effort` | `full` | Read-only tools, no MCP, no saved session. It lists about 70 tools whatever `--tools` says. Not signed in fails `judge_tool_unavailable`. |
+| Any other version | `best-effort` | as above | The same profile, unproven. |
 
-```console
-$ teamai score --next --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work","can":{"judge":{"isolation":"verified","access":"read","tools":["claude"]}}},"running":[]}'
-{"data":{"lease":{"ref":"s5d1e07c2a9b4/a91c0d7e","subject":{"runId":"r3f9…","step":"review","pass":1},
-  "prompt":"…/prompt.md","answer":{"schema":{…}},"submit":"teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin"}}}
-$ teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin <<'JSON'
-{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
- "answer":{"label":"good","reasoning":"…"},"judge":{"tool":"claude"}}
-JSON
-{"data":{"label":{"scorer":"review-quality","label":"good","score":1,"passed":true,…},"published":true}}
-```
+A `best-effort` tool cannot judge for a scorer that requires `verified`. Prompts travel through stdin or a file. Tool login and supported model-switch settings are kept. A scorer's model that no judge tool here runs leaves the work open for another driver, without changing the workflow result. [Choose the judge's model](#choose-the-judges-model) says which tool judges.
 
-`can.judge.access` says what your judge can do: `answer` (no tools), `read` (reads the evidence) or `full` (any tool, the default). Its labels record it. A label the scorer does not list is refused, and the lease stays open. `workflow next` never hands out judge work. `teamai score --help` has every field.
-
-With `scorers: { names: [review-quality, test-coverage], batch: true }`, the scorers of one pass that resolve to the same tool and model share one lease, one evidence directory and one prompt. The lease lists `scorers` and `batched: true`, and the answer has one label per scorer:
-
-```json
-{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
- "answer":{"review-quality":{"label":"good","reasoning":"…"},"test-coverage":{"label":"thin","reasoning":"…"}}}
-```
-
-Each label records `judge.batched: true`. One label a scorer does not list refuses the whole answer, and the lease stays open.
-
-Where labels go:
+## Where labels go
 
 | Path | What |
 |---|---|
 | `<dataHome>/scores/labels.jsonl` | Every label on this machine. |
 | `<dataHome>/scores/reasoning/` | The judge's reasoning, one file per label. Never published. |
+| `<dataHome>/scores/raw/` | A failed local judge's output, until a later attempt replaces it. |
 | `scores/<member>/<YYYY-MM>.jsonl` on `teamai-reports` | Published labels, the newest per scorer, rubric, pass and judge kind. Labels wait in `<dataHome>/scores/pending/` until a push lands, and stay there while usage reporting is off. |
 
-Workflow Runs shows each pass's labels, and what judging cost apart from the run's own tokens. For a run on this machine that counts every judge attempt; for a run a member published, only the labelled ones.
-
-`score --next` prepares `evidence.json`, `prompt.md`, `diff.patch` when a range was recorded, `repo/`, `transcripts/`, and `outputs.json`. The repository contains tracked files at the judged commit, with symlink targets stored as text. Transcripts include readable subagents and are redacted. Missing evidence is listed as gap codes. Evidence is removed when the lease settles or lapses.
-
-## Judge locally
-
-```sh
-teamai score --lease "$REF" --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work"}}'
-```
-
-This runs the tool the lease names and records the label through the same submit path as any driver. A failed run leaves the lease open.
-
-Claude uses a restricted read profile. Codex runs with a temporary home whose permission profile lets its shell read only the evidence, with no network and no writes. OpenCode runs standalone with isolated settings, database and data dirs, no project config, and denied command, edit, web, and external-directory permissions; its judge session and child sessions are deleted after reading. CodeBuddy runs with read-only tools, no MCP and no saved session; it has no restricted mode, so it stays `best-effort`, and a CodeBuddy that is not signed in fails `judge_tool_unavailable`. Labels record `access: read` for Claude, Codex and OpenCode, and `access: full` for CodeBuddy, which lists about 70 tools whatever `--tools` says. Prompts travel through stdin or a file. Tool login and supported model-switch settings are retained. A version without a verified profile is marked `best-effort`; it cannot serve a scorer that requires `verified`.
-
-For a scorer's model alias, the first declared tool that resolves it wins. A member's local default or active model switch uses the tool default. An unmapped or unreadable alias closes the entry with `judge_model_unavailable`, without changing the workflow result. The label records the model the tool reports, or the concrete model requested when none is reported. Failed judge output stays locally under `<dataHome>/scores/raw/`.
-
-Verified versions: Claude Code 2.1.308, codex-cli 0.163.0, and OpenCode v2.1.2. OpenCode is `verified` only when the temp dir it judges in is outside any git or hg checkout, because inside one its file tools may read the whole checkout.
+Labels never enter the run or its record. Workflow Runs shows each pass's labels, and what judging cost apart from the run's own tokens. For a run on this machine that counts every judge attempt; for a run a member published, only the labelled ones.

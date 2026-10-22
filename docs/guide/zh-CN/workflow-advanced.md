@@ -750,3 +750,11 @@ teamai workflow next <run> --json '{"claim":true,"driver":{"kind":"script","mach
 - 认领之后，驱动在继续一个本地已有的工作区之前，先把该分支向前移到运行记录的提交。本地分支领先于该提交或与它分叉、worktree 有改动或不在该分支上、或被只读步骤留下且尚未恢复时，驱动拒绝，什么都不移动。本地驱动在每次认领后、第一次租约前做一次这项检查，并以 `branch_diverged` 返回，说明该怎么做。
 - 认领带来的工作区在某个驱动租下其中的步骤之前没有所有者。该驱动成为它的所有者。
 - 另一台机器在一个自己打开工作区的步骤上持有的租约，会作为该步骤的下一个 pass 重新开始，使用新分支。旧分支和推送到它上面的内容留在 `origin` 上。该步骤会重新询问它的 HITL 问题。其他步骤上的租约被释放，并在同一个 pass 中重新运行。
+
+## 在自己的驱动里评审
+
+```text
+teamai score --next --json '{"driver":{"kind":"script","machine":"runner","workspace":"/work","can":{"judge":{"isolation":"best-effort","tools":["claude"]}}},"running":[]}'
+```
+
+评审任务来自 `teamai score --next`，从不来自 `workflow next`。见[评分器](scorers.md#任意-driver)。
