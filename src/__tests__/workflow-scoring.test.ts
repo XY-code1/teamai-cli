@@ -7,6 +7,8 @@ import { LabelStore } from '../scorers/label-store.js';
 import type { LocalConfig } from '../types.js';
 import { syncWorkflowDefinitions } from '../workflow/cache.js';
 import { leaseNext, reportAttempt, startRun } from '../workflow/engine.js';
+import { workflowRunDetail } from '../dashboard/workflow-runs.js';
+import { buildEndRecord } from '../workflow/records.js';
 import { projectRun } from '../workflow/snapshot.js';
 import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, scoredPasses, submitJudgeLease, type JudgeRequest } from '../workflow/scoring.js';
 import { installOwner, readRun } from '../workflow/store.js';
@@ -263,6 +265,37 @@ describe('judge work', () => {
   it('refuses a submission whose usage is not a finite number', () => {
     const payload: unknown = JSON.parse('{"driver":{"kind":"t3","machine":"m1","workspace":"/w"},"outcome":"success","answer":{"label":"good","reasoning":"r"},"judge":{"usage":{"inputTokens":1e309}}}');
     expect(parseJudgeSubmission(payload)).toMatch(/^judge\.usage\.inputTokens: /);
+  });
+});
+
+describe('scoring totals', () => {
+  /** Settles a run at `samplingRate`, judges whatever is offered with a released then a labelled attempt, and returns its end record. */
+  async function judgedRun(samplingRate: number) {
+    const config = fixture(scorer(samplingRate));
+    const runId = await settledRun(config);
+    const usage = { inputTokens: 1000, outputTokens: 50 };
+    for (const outcome of ['released', 'success'] as const) {
+      const lease = LeaseSchema.optional().parse(data(await nextJudgeLease(config, request())).lease);
+      if (!lease) break;
+      data(await submitJudgeLease(config, lease.ref, outcome === 'success'
+        ? { driver: judgeDriver, outcome, judge: { tool: 'claude', usage }, answer: { label: 'good', reasoning: 'Quokka-marmalade verdict.' } }
+        : { driver: judgeDriver, outcome, judge: { tool: 'claude', usage } }));
+    }
+    const run = await runOf(config, runId);
+    const { stepCounts, iterations, failure, steps } = buildEndRecord(run, workDriver, 'tester');
+    return { config, runId, totals: { stepCounts, iterations, failure, tokens: steps?.map((step) => step.tokens) } };
+  }
+
+  it('leaves a run\'s counts, iterations, failure and work tokens as they are at samplingRate 0', async () => {
+    const sampled = await judgedRun(100);
+    const unsampled = await judgedRun(0);
+    expect(sampled.totals).toEqual(unsampled.totals);
+
+    const detail = await workflowRunDetail(sampled.config, 'local', sampled.runId);
+    expect(detail?.steps).toEqual([expect.objectContaining({ step: 'review', pass: 1, scores: [{ scorer: 'quality', label: 'good', passed: true }] })]);
+    expect(detail?.scoring).toEqual({ judged: 2, inputTokens: 2000, outputTokens: 100 });
+    expect(JSON.stringify(detail)).not.toContain('Quokka-marmalade');
+    expect((await workflowRunDetail(unsampled.config, 'local', unsampled.runId))?.scoring).toEqual({ judged: 0, inputTokens: 0, outputTokens: 0 });
   });
 });
 

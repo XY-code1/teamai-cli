@@ -44,3 +44,30 @@ roles:
 它会替换根目录下同名的评分器。同一个名字出现在两个生效的命名空间里会报错。没有角色也没有项目的团队会拿到所有命名空间。
 
 工作流步骤用 `scorers: [review-quality]` 列出评判它的评分器。完整写法见[工作流](workflow.md)。
+
+## 任意驱动评审
+
+运行结束时不等待评审。之后任意驱动都可以领取评审任务，并提交它自己的评审结果：
+
+```console
+$ teamai score --next --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work","can":{"judge":{"isolation":"verified","access":"read","tools":["claude"]}}},"running":[]}'
+{"data":{"lease":{"ref":"s5d1e07c2a9b4/a91c0d7e","subject":{"runId":"r3f9…","step":"review","pass":1},
+  "prompt":"…/prompt.md","answer":{"schema":{…}},"submit":"teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin"}}}
+$ teamai score --lease s5d1e07c2a9b4/a91c0d7e --submit --stdin <<'JSON'
+{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
+ "answer":{"label":"good","reasoning":"…"},"judge":{"tool":"claude"}}
+JSON
+{"data":{"label":{"scorer":"review-quality","label":"good","score":1,"passed":true,…},"published":true}}
+```
+
+`can.judge.access` 说明你的评审能做什么：`answer`（不用工具）、`read`（读取证据）或 `full`（任意工具，默认值）。它的标签会记录该值。评分器未列出的标签会被拒绝，租约保持打开。`workflow next` 从不分发评审任务。所有字段见 `teamai score --help`。
+
+标签存放位置：
+
+| 路径 | 内容 |
+|---|---|
+| `<dataHome>/scores/labels.jsonl` | 本机的所有标签。 |
+| `<dataHome>/scores/reasoning/` | 评审者的理由，每个标签一个文件。从不发布。 |
+| `teamai-reports` 上的 `scores/<member>/<YYYY-MM>.jsonl` | 已发布的标签，每个评分器、评分标准、执行轮次和评审类型只保留最新一条。推送成功前标签留在 `<dataHome>/scores/pending/`；关闭用量上报时一直留在那里。 |
+
+工作流运行页面显示每一轮的标签，以及评审开销，与运行本身的 token 分开统计。本机的运行统计每一次评审尝试；成员发布的运行只统计产生了标签的评审。

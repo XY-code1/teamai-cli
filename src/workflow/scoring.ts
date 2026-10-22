@@ -420,5 +420,10 @@ export async function submitJudgeLease(config: LocalConfig, ref: string, submiss
     await fs.rm(evidenceDir(config, attempt.attempt), { recursive: true, force: true, maxRetries: 3 });
     return ok(labelAnswer(config, succeeded));
   });
-  return outcome.status === 'busy' ? error('busy', 'The judge attempts are locked by another process. Submit again.') : outcome.value;
+  if (outcome.status === 'busy') return error('busy', 'The judge attempts are locked by another process. Submit again.');
+  if ('error' in outcome.value || !('label' in outcome.value.data)) return outcome.value;
+  // Publishing is best effort: a label that does not reach teamai-reports now stays pending for the next pull.
+  const delivery = await LabelStore.publish(config).catch((e: unknown) => ({ state: 'pending' as const, reason: e instanceof Error ? e.message : String(e) }));
+  if (delivery.state === 'pending') log.debug(`[scores] Labels stay pending: ${delivery.reason}`);
+  return ok({ ...outcome.value.data, published: delivery.state === 'published' });
 }

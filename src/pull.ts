@@ -3259,6 +3259,13 @@ export async function pull(
           } catch (e) {
             log.debug(`Workflow record publish to ${t.repoPath} deferred: ${(e as Error).message}`);
           }
+          // Score labels a submit could not publish (#1085) ride the same drain.
+          try {
+            const { LabelStore } = await import('./scorers/label-store.js');
+            await LabelStore.publish(t.opts.selfConfig);
+          } catch (e) {
+            log.debug(`Score label publish to ${t.repoPath} deferred: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
 
         // Cap every active scope, reporting or not (#788): http and
