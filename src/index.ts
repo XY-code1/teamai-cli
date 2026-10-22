@@ -870,13 +870,19 @@ workflowCmd
 
 program
   .command('score')
-  .description('Judge workflow passes with team scorers (scorers/<name>.md). Any driver takes judge work with --next, runs its own judge on the lease prompt with the lease evidence directory as its only readable root and settles it with --lease <ref> --submit, or judges it here with --lease <ref>. workflow next never hands out judge work, and a driver never lists a judge ref in workflow next running. Prints one JSON envelope.')
+  .description('Judge workflow passes with team scorers (scorers/<name>.md). Any driver takes judge work with --next, runs its own judge on the lease prompt with the lease evidence directory as its only readable root and settles it with --lease <ref> --submit, or judges it here with --lease <ref>. --run <id> --step <path> --scorer <name> judges a pass on demand. workflow next never hands out judge work, and a driver never lists a judge ref in workflow next running. Prints one JSON envelope.')
   .option('--next', 'Take judge work: a lease with ref, scorer, subject, evidence, prompt, answer.schema, expiresAt and a submit command line, or idle with counts. A batch lease, for scorers of one pass that share a judge call, has scorers and batched: true instead of scorer. --json {"driver":{"kind":"t3","machine":"host","workspace":"/work","can":{"judge":{"isolation":"verified","access":"read","tools":["claude"]}}},"running":["<ref>"]}. isolation is verified or best-effort; access is what your judge can do, answer (no tools), read (reads the evidence) or full (any tool), default full, and its labels record it; tools in your order of preference. running lists the judge refs you still run, which renews them; a live lease of yours left out is handed back. A lease lapses 30 minutes after it was taken or renewed.')
   .option('--lease <ref>', 'The judge lease, as --next printed it (s<13 hex>/a<8 hex>). Without --submit, judge it here with the tool the lease names, in a confined profile, and settle it through the submit path: --json {"driver":{…same as --next…}}.')
   .option('--submit', 'Settle --lease <ref> with the payload {"driver":{…same as --next…},"outcome":"success","answer":{"label":"<one of answer.schema>","reasoning":"…"},"judge":{"tool":"claude","model":"…","usage":{"inputTokens":0,"outputTokens":0}}}. For a batch lease, answer is {"<scorer>":{"label":"…","reasoning":"…"},…} with one entry per scorer. outcome is success, failed, or released. A label a scorer does not list is refused, the whole answer with it, and the lease stays open; teamai computes score and passed.')
   .option('--json <payload>', 'The payload as a JSON string')
   .option('--stdin', 'Read the payload from stdin')
-  .action(async (cmdOpts: { next?: boolean; lease?: string; submit?: boolean; json?: string; stdin?: boolean }) => {
+  .option('--run <id>', 'Judge a pass of this run on demand, whatever sampling says, with --step and --scorer; this also reopens judge work that failed or expired. Without --queue, judges it here with the local judge and prints the label.')
+  .option('--step <path>', 'With --run: the step path, such as review or check.review')
+  .option('--pass <n>', 'With --run: the pass to judge; default the step\'s latest succeeded pass')
+  .option('--scorer <name>', 'With --run: a scorer the run pinned or one teamai pull cached. Repeatable.', (value: string, previous: string[]) => previous.concat(value), [] as string[])
+  .option('--queue', 'With --run: leave the work to any driver\'s score --next instead of judging it here')
+  .option('--batch', 'With --run: the scorers share one judge call when they resolve to the same tool and model')
+  .action(async (cmdOpts: { next?: boolean; lease?: string; submit?: boolean; json?: string; stdin?: boolean; run?: string; step?: string; pass?: string; scorer?: string[]; queue?: boolean; batch?: boolean }) => {
     const { scoreCommand } = await import('./score-commands.js');
     await scoreCommand(cmdOpts);
   });

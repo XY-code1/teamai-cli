@@ -10,9 +10,10 @@ import { DriverSchema } from '../driver-identity.js';
 import type { LocalConfig } from '../types.js';
 import { log } from '../utils/logger.js';
 import {
-  AttemptStore, newAttemptId, scoresDir, type AttemptRecord, type JudgeDriver, type LeasedAttempt, type SucceededAttempt,
+  AttemptStore, newAttemptId, rawOutputPath, scoresDir, type AttemptRecord, type JudgeDriver, type LeasedAttempt, type ScoreRequest, type SucceededAttempt,
 } from '../scorers/attempts.js';
 import { batchesScorers, JudgeAnswerSchema, verdictsOf } from '../scorers/batch.js';
+import { cachedScorerNames, pinScorers } from '../scorers/cache.js';
 import { loadTeamConfig } from '../config.js';
 import { pinnedDefinition, type PinnedScorer } from '../scorers/pin.js';
 import type { ScorerDefinition } from '../scorers/definition.js';
@@ -22,15 +23,16 @@ import {
 import { observedEffort, observedModel } from '../agent-observation.js';
 import { ACCESS_LEVELS, ISOLATIONS, JudgeUsageSchema, sumUsage, type Isolation, type JudgeAccess, type JudgeUsage, type RunSubject, type ScoreLabel } from '../scorers/label.js';
 import { LabelStore, reasoningPath, shareFailedLabelHint } from '../scorers/label-store.js';
-import { isJudgeTool, runLocalJudge } from '../scorers/judge.js';
+import { installedJudgeTools, isJudgeTool, runLocalJudge } from '../scorers/judge.js';
 import { loadModelAliases } from '../models/aliases.js';
 import { chooseJudgeModel } from '../scorers/judge-model.js';
 import { isSampled } from '../scorers/sampling.js';
 import { scoringUnavailable } from '../scorers/home.js';
 import { requiredIsolation, scopeIsolation, scorerIsolationSource, unknownIsolationText, type IsolationSetting } from '../scorers/isolation.js';
 import { answerSchema, evidenceDirOf, sweepEvidence, type Rubrics } from '../scorers/evidence.js';
-import { buildEvidence } from './scoring-evidence.js';
+import { buildEvidence, evidencePlan } from './scoring-evidence.js';
 import { error, ok } from './engine.js';
+import { localDriver } from './local-driver.js';
 import { firstSettled, passesWithin, runPasses, type RunPass } from './loop.js';
 import { stepDefinitions } from './scope.js';
 import { parseStepPath } from './step-path.js';
@@ -48,21 +50,28 @@ function settledHere(run: RunState, pass: RunPass, install: string): boolean {
   return pass.installId === undefined ? run.publication === undefined : pass.installId === install;
 }
 
+/** The passes a judge can judge: succeeded passes of prompt and workflow steps, and of a `for_each` step only its items. */
+function judgeablePasses(run: RunState): Array<{ pass: RunPass; definition: WorkflowStep }> {
+  const definitionOf = stepDefinitions(run);
+  return runPasses(run).flatMap((pass) => {
+    const definition: WorkflowStep | undefined = definitionOf(pass.step);
+    if (pass.outcome !== 'success' || !definition) return [];
+    if (definition.forEach && parseStepPath(pass.step).at(-1)?.index === undefined) return [];
+    return [{ pass, definition }];
+  });
+}
+
 /**
- * The passes of `run` this install may judge: succeeded passes of prompt and workflow steps that list a scorer the run
- * pinned, and of a `for_each` step only its items. A prompt pass belongs to the install that settled it; a workflow pass
- * to the install that settled its first child that has a stamp. Sampling is left to the caller.
+ * The passes of `run` this install may judge: judgeable passes of steps that list a scorer the run pinned. A prompt pass
+ * belongs to the install that settled it; a workflow pass to the install that settled its first child that has a
+ * stamp. Sampling is left to the caller.
  */
 export function scoredPasses(run: RunState, install: string): ScorablePass[] {
-  const definitionOf = stepDefinitions(run);
   const all = runPasses(run);
   const pinned = run.scorers ?? {};
-  return all.flatMap((pass) => {
-    if (pass.outcome !== 'success') return [];
-    const definition: WorkflowStep | undefined = definitionOf(pass.step);
-    const scorers = (definition?.scorers?.names ?? []).filter((name) => Object.hasOwn(pinned, name));
-    if (!definition || scorers.length === 0) return [];
-    if (definition.forEach && parseStepPath(pass.step).at(-1)?.index === undefined) return [];
+  return judgeablePasses(run).flatMap(({ pass, definition }) => {
+    const scorers = (definition.scorers?.names ?? []).filter((name) => Object.hasOwn(pinned, name));
+    if (scorers.length === 0) return [];
     const owner = definition.workflow === undefined ? pass
       : firstSettled(passesWithin(run, all, pass.step, pass.pass).filter((child) => child.installId !== undefined));
     if (!settledHere(run, owner ?? pass, install)) return [];
@@ -77,6 +86,8 @@ export interface JudgeRequest {
   judge: { isolation: Isolation; access?: JudgeAccess; tools: [string, ...string[]] };
   /** The lease refs the driver is still running; each is renewed. A live lease of this driver it leaves out is handed back. */
   running: string[];
+  /** On demand: only these entries. */
+  entries?: readonly string[];
 }
 
 const NextPayloadSchema = z.object({
@@ -137,17 +148,22 @@ interface ScoreEntry {
   state: EntryState;
   /** Whether the step's scorers share one judge call. */
   batch: boolean;
+  /** When a member last asked for this entry with `teamai score --run`. */
+  requestedAt?: string;
 }
 
-/** The runs a judge may still be asked about: running ones, those with a live lease, and those changed inside the entry window. */
-async function recentRuns(config: LocalConfig, now: string, leased: ReadonlySet<string>): Promise<RunState[]> {
+/** Every readable run of this scope, oldest first. */
+async function localRuns(config: LocalConfig): Promise<RunState[]> {
   const files = await fs.readdir(runsDir(config)).catch(() => []);
   const ids = files.filter((file) => file.endsWith('.json')).map((file) => file.slice(0, -'.json'.length)).filter(isRunId);
   const runs = await Promise.all(ids.map((id) => readRun(config, id)));
-  return runs
-    .filter((run): run is RunState => typeof run === 'object')
-    .filter((run) => run.status === 'running' || leased.has(run.id) || Date.parse(run.updatedAt) + ENTRY_WINDOW_MS > Date.parse(now))
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return runs.filter((run): run is RunState => typeof run === 'object').sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
+/** The runs a judge may still be asked about: running ones, those `kept` names, and those changed inside the entry window. */
+async function recentRuns(config: LocalConfig, now: string, kept: ReadonlySet<string>): Promise<RunState[]> {
+  return (await localRuns(config))
+    .filter((run) => run.status === 'running' || kept.has(run.id) || Date.parse(run.updatedAt) + ENTRY_WINDOW_MS > Date.parse(now));
 }
 
 function sameSubject(label: ScoreLabel, scorer: string, sourceHash: string, subject: RunSubject): boolean {
@@ -172,28 +188,43 @@ function workflowBatch(run: RunState, step: string): boolean | undefined {
   return batch;
 }
 
+/** The sampled entries of each recent run, and the ones a member asked for, which replace a sampled one of the same id. */
 async function entries(config: LocalConfig, now: string): Promise<ScoreEntry[]> {
   const install = (await installOwner(config)).id;
-  const [labels, attempts, team] = await Promise.all([LabelStore.local(config), AttemptStore.read(config), loadTeamConfig(config.repo.localPath)]);
-  const leased = new Set([...attempts.values()].flat().filter((attempt) => attempt.status === 'leased' && !hasLapsed(attempt, now))
-    .map((attempt) => attempt.subject.runId));
-  const runs = await recentRuns(config, now, leased);
-  return runs.flatMap((run) => scoredPasses(run, install).flatMap(({ subject, scorers }) => {
-    const batch = batchesScorers({ step: stepDefinitions(run)(subject.step)?.scorers?.batch, workflow: workflowBatch(run, subject.step), team: team?.scoring?.batch });
-    return scorers.flatMap((scorer) => {
-    const pin = run.scorers?.[scorer];
-    const definition = pin && pinnedDefinition(scorer, pin);
-    if (!pin || !definition || !isSampled(scorer, subject, definition.samplingRate)) return [];
-    const id = entryIdOf(scorer, subject);
-    const state = entryState({
-      labels: labels.filter((label) => sameSubject(label, scorer, pin.sourceHash, subject)),
-      attempts: attempts.get(id) ?? [],
-      subjectChangedAt: run.updatedAt,
-      now,
-    });
-    return [{ id, run, scorer, pin, definition, subject, state, batch }];
-    });
-  }));
+  const [labels, attempts, team, requests] = await Promise.all([
+    LabelStore.local(config), AttemptStore.read(config), loadTeamConfig(config.repo.localPath), AttemptStore.requests(config),
+  ]);
+  const kept = new Set([
+    ...[...attempts.values()].flat().filter((attempt) => attempt.status === 'leased' && !hasLapsed(attempt, now)).map((attempt) => attempt.subject.runId),
+    ...requests.map((request) => request.subject.runId),
+  ]);
+  const runs = await recentRuns(config, now, kept);
+  return runs.flatMap((run) => {
+    const entryOf = (scorer: string, pin: PinnedScorer, subject: RunSubject, request?: ScoreRequest): ScoreEntry[] => {
+      const definition = pinnedDefinition(scorer, pin);
+      if (!definition) return [];
+      const id = entryIdOf(scorer, subject);
+      const state = entryState({
+        labels: labels.filter((label) => sameSubject(label, scorer, pin.sourceHash, subject)),
+        attempts: attempts.get(id) ?? [],
+        subjectChangedAt: run.updatedAt,
+        ...(request ? { requestedAt: request.requestedAt } : {}),
+        now,
+      });
+      const batch = request?.batch ?? batchesScorers({ step: stepDefinitions(run)(subject.step)?.scorers?.batch, workflow: workflowBatch(run, subject.step), team: team?.scoring?.batch });
+      return [{ id, run, scorer, pin, definition, subject, state, batch, ...(request ? { requestedAt: request.requestedAt } : {}) }];
+    };
+    const requested = requests.filter((request) => request.subject.runId === run.id)
+      .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt) || left.scorer.localeCompare(right.scorer))
+      .flatMap((request) => entryOf(request.scorer, request.pin, request.subject, request));
+    const sampled = scoredPasses(run, install).flatMap(({ subject, scorers }) => scorers.flatMap((scorer) => {
+      const pin = run.scorers?.[scorer];
+      const definition = pin && pinnedDefinition(scorer, pin);
+      if (!pin || !definition || !isSampled(scorer, subject, definition.samplingRate)) return [];
+      return entryOf(scorer, pin, subject);
+    }));
+    return [...sampled.filter((entry) => !requested.some((request) => request.id === entry.id)), ...requested];
+  });
 }
 
 function requiredFor(settings: readonly IsolationSetting[], { scorer, pin, definition }: Pick<ScoreEntry, 'scorer' | 'pin' | 'definition'>): Isolation {
@@ -229,6 +260,19 @@ interface Member {
 
 function rubricOf(pin: PinnedScorer): { sourceHash: string; teamRevision?: string } {
   return { sourceHash: pin.sourceHash, ...(pin.teamRevision ? { teamRevision: pin.teamRevision } : {}) };
+}
+
+/** What a lease keeps of `pin`: the revision and file it came from. Its text is kept by hash. */
+function sourceOf({ content: _content, ...source }: PinnedScorer): LeasedAttempt['rubric'] {
+  return source;
+}
+
+/** The rubric `attempt` was leased with: the text kept by its hash, pinned from the file and revision the attempt names. */
+async function leasedRubric(config: LocalConfig, attempt: AttemptRecord): Promise<{ pin: PinnedScorer; definition: ScorerDefinition } | undefined> {
+  const kept = await AttemptStore.rubric(config, attempt.rubric.sourceHash);
+  const pin = kept && { ...attempt.rubric, content: kept.content };
+  const definition = pin && pinnedDefinition(attempt.scorer, pin);
+  return pin && definition ? { pin, definition } : undefined;
 }
 
 function rubricsOf<T>(members: readonly [T, ...T[]], definitionOf: (member: T) => ScorerDefinition): Rubrics {
@@ -292,7 +336,8 @@ export type TakenLease = (OneLease & { closed: ClosedEntry[] }) | { kind: 'busy'
 
 /**
  * The one way to get judge work; `workflow next` never hands it out. Releases a live lease of this driver that it no
- * longer offers the tool or isolation for, renews the leases it lists in `running`, hands back one it left out, else
+ * longer offers the tool or isolation for, or whose kept rubric is gone, renews the leases it lists in `running`, hands
+ * back one it left out with the rubric it was taken with, else
  * leases the first open entry, oldest run first, whose isolation the driver meets. When its step batches scorers, the
  * other open entries of the same pass that resolve to the same tool and model join that lease. Answers `idle` with
  * counts when there is none. An entry whose evidence is empty closes, and the next one is tried. An entry whose scorer's
@@ -325,7 +370,8 @@ async function takeOneLease(config: LocalConfig, request: JudgeRequest, now: str
     log.warn(unavailable);
     return { kind: 'idle', open: 0, leased: 0, skipped: [] };
   }
-  const found = await entries(config, now);
+  const all = await entries(config, now);
+  const found = all.filter((entry) => !request.entries || request.entries.includes(entry.id));
   const aliases = await loadModelAliases(config);
   const isolation = await scopeIsolation(config);
   for (const unknown of requiredIsolation(isolation).unknown) log.warn(`${unknownIsolationText(unknown)}.`);
@@ -335,9 +381,13 @@ async function takeOneLease(config: LocalConfig, request: JudgeRequest, now: str
   const leasable = (entry: ScoreEntry) => isOpen(entry) && meets(request.judge.isolation, requiredFor(isolation, entry));
   const running = new Set(request.running.flatMap((ref) => parseLeaseRef(ref)?.attempt ?? []));
   const outcome = await AttemptStore.locked(config, async (): Promise<{ members: Members; handedBack: boolean } | undefined> => {
+    for (const entry of all) {
+      if (entry.requestedAt !== undefined && entry.state.kind !== 'open' && entry.state.kind !== 'leased') await AttemptStore.closeRequest(config, entry.id, entry.requestedAt);
+    }
+    await AttemptStore.sweep(config);
     // Re-read under the lock: another driver may have taken an entry since the unlocked read.
     const isFresh = async (entry: ScoreEntry) =>
-      entryState({ labels: [], attempts: await AttemptStore.ofEntry(config, entry.id), subjectChangedAt: entry.run.updatedAt, now }).kind === 'open';
+      entryState({ labels: [], attempts: await AttemptStore.ofEntry(config, entry.id), subjectChangedAt: entry.run.updatedAt, requestedAt: entry.requestedAt, now }).kind === 'open';
     const mine = new Map<string, Members>();
     for (const entry of found) {
       const live = (await AttemptStore.ofEntry(config, entry.id))
@@ -349,14 +399,16 @@ async function takeOneLease(config: LocalConfig, request: JudgeRequest, now: str
         continue;
       }
       if (!sameDriver(live.driver, request.driver)) continue;
-      if (!stillJudges(request, live)) {
+      const rubric = await leasedRubric(config, live);
+      if (!rubric || !stillJudges(request, live)) {
         await AttemptStore.write(config, { ...live, status: 'released', settledAt: now });
         released.add(entry.id);
       } else if (running.has(live.attempt)) {
         await AttemptStore.write(config, { ...live, expiresAt: later(now, LEASE_TTL_MS) });
       } else {
+        const member = { entry: { ...entry, ...rubric }, attempt: live };
         const lease = mine.get(live.attempt);
-        mine.set(live.attempt, lease ? [...lease, { entry, attempt: live }] : [{ entry, attempt: live }]);
+        mine.set(live.attempt, lease ? [...lease, member] : [member]);
       }
     }
     const [back] = mine.values();
@@ -370,7 +422,7 @@ async function takeOneLease(config: LocalConfig, request: JudgeRequest, now: str
         attempt,
         entry: member.id,
         scorer: member.scorer,
-        rubric: { sourceHash: member.pin.sourceHash },
+        rubric: sourceOf(member.pin),
         subject: member.subject,
         driver: request.driver,
         judge: { ...choice, isolation: request.judge.isolation, access: request.judge.access ?? 'full' },
@@ -390,6 +442,7 @@ async function takeOneLease(config: LocalConfig, request: JudgeRequest, now: str
       }
       const batch = mates.length > 0 ? [entry.id, ...mates.map((mate) => mate.entry.id)] : undefined;
       const members: Members = [{ entry, attempt: leased(entry, chosen.choice, batch) }, ...mates.map((mate) => ({ entry: mate.entry, attempt: leased(mate.entry, mate.choice, batch) }))];
+      for (const member of members) await AttemptStore.keepRubric(config, member.entry.pin);
       for (const member of members) await AttemptStore.write(config, member.attempt);
       return { members, handedBack: false };
     }
@@ -482,12 +535,10 @@ async function leaseMembers(config: LocalConfig, attempt: AttemptRecord, ref: st
   const members: Judged[] = [];
   for (const record of records) {
     if (!record) return error('lease_unknown', `Judge lease ${ref} is not on this machine.`);
-    const pin = typeof run === 'object' ? run.scorers?.[record.scorer] : undefined;
-    const definition = pin && pinnedDefinition(record.scorer, pin);
-    if (typeof run !== 'object' || !pin || !definition) {
-      return error('lease_unknown', `The scorer ${record.scorer} that judge lease ${ref} was for is no longer pinned by run ${record.subject.runId}.`);
-    }
-    members.push({ attempt: record, pin, definition });
+    const rubric = await leasedRubric(config, record);
+    if (typeof run !== 'object') return error('lease_unknown', `Run ${record.subject.runId}, which judge lease ${ref} was for, is not on this machine.`);
+    if (!rubric) return error('lease_unknown', `The rubric of scorer ${record.scorer} that judge lease ${ref} was taken with is not on this machine.`);
+    members.push({ attempt: record, ...rubric });
   }
   const [head, ...tail] = members;
   if (!head || typeof run !== 'object') return error('lease_unknown', `Judge lease ${ref} is not on this machine.`);
@@ -519,7 +570,8 @@ async function settleJudgeLease<T extends { kind: string }>(
     const settledAs = members.find((member) => member.attempt.status !== 'leased')?.attempt.status;
     if (settledAs) return error('lease_settled', `Judge lease ${ref} was already settled as ${settledAs}.`);
     for (const { attempt } of members) {
-      const state = entryState({ labels: [], attempts: await AttemptStore.ofEntry(config, attempt.entry), subjectChangedAt: run.updatedAt, now });
+      const requestedAt = (await AttemptStore.request(config, attempt.entry))?.requestedAt;
+      const state = entryState({ labels: [], attempts: await AttemptStore.ofEntry(config, attempt.entry), subjectChangedAt: run.updatedAt, requestedAt, now });
       switch (state.kind) {
         case 'open':
           break;
@@ -713,7 +765,7 @@ export async function judgeLease(config: LocalConfig, ref: string, driver: Judge
     const raw = result.ok ? JSON.stringify(result.answer) : result.raw;
     let saved = '';
     if (raw !== undefined) {
-      const file = path.join(scoresDir(config), 'raw', `${attempt.attempt}.txt`);
+      const file = rawOutputPath(config, attempt.attempt);
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(file, raw, { mode: 0o600 });
       saved = ` Output saved to ${file}.`;
@@ -730,4 +782,86 @@ export async function runJudgeLease(config: LocalConfig, ref: string, value: unk
   const parsed = z.object({ driver: DriverSchema }).safeParse(value);
   if (!parsed.success) return error('invalid_json', issueText(parsed.error.issues));
   return settledAnswer(config, ref, await judgeLease(config, ref, parsed.data.driver));
+}
+
+/** What `teamai score --run <id> --step <path> [--pass <n>] --scorer <name>… [--queue] [--batch]` asks for. */
+export interface ScoreDemand {
+  run: string;
+  step: string;
+  /** Omitted: the step's latest succeeded pass. */
+  pass?: number;
+  scorers: readonly string[];
+  /** Leave the judging to any driver's `teamai score --next`. */
+  queue?: boolean;
+  /** The scorers share one judge call when they resolve to the same tool and model. */
+  batch?: boolean;
+}
+
+/**
+ * Judges a pass with the named scorers whatever sampling says, and reopens an entry that failed or expired. A scorer the
+ * run pinned judges with that rubric; any other scorer cached here, with its current one. Records a request per scorer,
+ * then judges here with the local judge, or with `queue` leaves the work to any driver.
+ */
+export async function scoreOnDemand(config: LocalConfig, demand: ScoreDemand, now = new Date().toISOString()): Promise<WorkflowEnvelope> {
+  const unavailable = scoringUnavailable(config);
+  if (unavailable) return error('scoring_unavailable', unavailable);
+  const run = isRunId(demand.run) ? await readRun(config, demand.run) : 'missing';
+  if (typeof run !== 'object') {
+    const ids = (await localRuns(config)).reverse().slice(0, 10).map((known) => known.id);
+    return error('run_not_found', `Run ${demand.run} is not on this machine. ${ids.length > 0 ? `Runs here, newest first: ${ids.join(', ')}.` : 'This scope has no runs.'}`);
+  }
+  const judgeable = judgeablePasses(run).map(({ pass }) => pass);
+  const ofStep = judgeable.filter((pass) => pass.step === demand.step).map((pass) => pass.pass).sort((left, right) => left - right);
+  const latest = ofStep.at(-1);
+  if (latest === undefined) {
+    const steps = [...new Set(judgeable.map((pass) => pass.step))];
+    return error('step_not_found', `Step ${demand.step} has no succeeded pass in run ${run.id}. ${steps.length > 0 ? `Steps with one: ${steps.join(', ')}.` : 'No step of it succeeded.'}`);
+  }
+  const pass = demand.pass ?? latest;
+  if (!ofStep.includes(pass)) return error('pass_not_found', `Pass ${pass} of step ${demand.step} did not succeed in run ${run.id}. Succeeded passes: ${ofStep.join(', ')}.`);
+  const subject: RunSubject = { runId: run.id, step: demand.step, pass };
+  const cached = await pinScorers(config, demand.scorers.filter((name) => !Object.hasOwn(run.scorers ?? {}, name)));
+  const asked: Array<{ scorer: string; pin: PinnedScorer }> = [];
+  for (const scorer of new Set(demand.scorers)) {
+    const pin = run.scorers?.[scorer] ?? cached[scorer];
+    if (!pin || !pinnedDefinition(scorer, pin)) {
+      const known = [...new Set([...Object.keys(run.scorers ?? {}), ...await cachedScorerNames(config)])].sort();
+      return error('scorer_not_found', `Scorer ${scorer} is neither pinned by run ${run.id} nor cached here. ${known.length > 0 ? `Scorers: ${known.join(', ')}.` : 'Run teamai pull to cache the team\'s scorers.'}`);
+    }
+    asked.push({ scorer, pin });
+  }
+  const recorded = await AttemptStore.locked(config, async () => {
+    for (const { scorer, pin } of asked) {
+      await AttemptStore.writeRequest(config, { entry: entryIdOf(scorer, subject), scorer, subject, pin, requestedAt: now, ...(demand.batch ? { batch: true } : {}) });
+    }
+  });
+  if (recorded.status === 'busy') return error('busy', 'The judge attempts are locked by another process. Ask again.');
+  if (demand.queue) return ok({ queued: asked.map(({ scorer }) => ({ scorer, subject })) });
+
+  const [tool, ...tools] = installedJudgeTools(evidencePlan(run, subject).passes.flatMap((judged) => judged.tool ?? []));
+  if (!tool) return error('judge_tool_unavailable', 'No judge tool is on PATH. Install Claude Code, Codex, OpenCode or CodeBuddy, or add --queue so another driver judges this pass.');
+  const driver = localDriver(process.cwd());
+  const ids = asked.map(({ scorer }) => entryIdOf(scorer, subject));
+  const labelled: SucceededAttempt[] = [];
+  let published = true;
+  for (;;) {
+    const taken = await takeJudgeLease(config, { driver, judge: { isolation: 'verified', tools: [tool, ...tools] }, running: [], entries: ids }, now);
+    if (taken.kind === 'busy') return error('busy', 'The judge attempts are locked by another process. Ask again.');
+    if (taken.closed.some((closed) => closed.code === 'evidence_empty')) {
+      return error('evidence_empty', 'No recorded evidence could be read for this pass. Restore its commits or session, then run this command again.');
+    }
+    if (taken.kind === 'idle') {
+      if (taken.skipped.length === 0) break;
+      const message = taken.skipped.map((skipped) => skipped.message).join(' ');
+      if (labelled.length === 0) return error('judge_model_unavailable', message);
+      const kept = labelled.map((attempt) => `${attempt.scorer}: ${attempt.verdict.label}`).join(', ');
+      return { error: { code: 'judge_model_unavailable', message: `${message} Kept the label of ${kept}.`, labels: labelled.map((attempt) => labelAnswer(config, attempt)) } };
+    }
+    const judged = await judgeLease(config, taken.lease.ref, driver);
+    if ('error' in judged) return judged;
+    labelled.push(...judged.attempts);
+    published &&= judged.published;
+  }
+  if (labelled.length === 0) return error('entry_leased', 'Another driver holds the judge lease for this pass. Retry once it settles or lapses (30 minutes), or add --queue.');
+  return ok({ ...labelsAnswer(config, labelled), published });
 }

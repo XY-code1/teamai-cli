@@ -15,7 +15,7 @@ import { leaseNext, reportAttempt, startRun } from '../workflow/engine.js';
 import { workflowRunDetail } from '../dashboard/workflow-runs.js';
 import { buildEndRecord } from '../workflow/records.js';
 import { projectRun } from '../workflow/snapshot.js';
-import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, runJudgeLease, scoredPasses, submitJudgeLease, type JudgeRequest } from '../workflow/scoring.js';
+import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, runJudgeLease, scoreOnDemand, scoredPasses, submitJudgeLease, type JudgeRequest } from '../workflow/scoring.js';
 import { installOwner, readRun } from '../workflow/store.js';
 import type { DriverIdentity, RunState, WorkflowEnvelope } from '../workflow/types.js';
 
@@ -752,6 +752,234 @@ process.stdin.resume(); process.stdin.on('end', () => console.log(JSON.stringify
     const config = batchFixture('[quality, tests]', '', 'scoring:\n  batch: true\n');
     await settledRun(config);
     expect(BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease).scorers).toEqual(['quality', 'tests']);
+  });
+});
+
+describe('judge on demand', () => {
+  const extra = scorer(0).replace('Judge the review.', 'Judge the extra.');
+  function fakeClaude(config: LocalConfig): void {
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('2.1.308 (Claude Code)'); process.exit(); }
+process.stdin.resume(); process.stdin.on('end', () => {
+console.log(JSON.stringify({ type: 'result', structured_output: { label: 'good', reasoning: 'found the defect' } }));
+});\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+  }
+  const labelsOf = (config: LocalConfig): unknown[] =>
+    fs.readFileSync(path.join(config.dataHome ?? '', 'scores', 'labels.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as unknown);
+  const success = (label = 'good') => ({ driver: judgeDriver, outcome: 'success' as const, answer: { label, reasoning: 'r' } });
+
+  it('judges the latest succeeded pass here with the local tool, whatever sampling says', async () => {
+    const config = fixture(scorer(0));
+    const runId = await settledRun(config);
+    fakeClaude(config);
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 } });
+
+    expect(data(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['quality'] }))).toMatchObject({
+      label: { scorer: 'quality', subject: { runId, step: 'review', pass: 1 }, label: 'good', score: 1, passed: true },
+    });
+    expect(labelsOf(config)).toEqual([expect.objectContaining({ subject: { runId, step: 'review', pass: 1 }, judge: expect.objectContaining({ tool: 'claude', access: 'read' }) })]);
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 } });
+  });
+
+  it('says which judge tools the scorer\'s alias has no model for, and in which file, and leaves the work open', async () => {
+    const config = fixture(scorer(0).replace('samplingRate: 0', 'samplingRate: 0\nmodel: fast'));
+    fs.mkdirSync(path.join(config.repo.localPath, 'models'));
+    fs.writeFileSync(path.join(config.repo.localPath, 'models', 'aliases.yaml'), 'aliases:\n  fast:\n    codex: gpt-6-mini\n');
+    const runId = await settledRun(config);
+    fakeClaude(config);
+    vi.stubEnv('PATH', [path.join(config.projectRoot ?? '', 'bin'), '/usr/bin', '/bin'].join(path.delimiter));
+
+    expect(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['quality'] })).toEqual({ error: {
+      code: 'judge_model_unavailable',
+      message: 'Scorer "quality" asks for model alias "fast", which has no model for claude in models/aliases.yaml. Add one, or remove model from the scorer.',
+    } });
+    expect(data(await nextJudgeLease(config, request({ judge: { isolation: 'verified', tools: ['codex'] } })))).toMatchObject({ lease: { judge: { tool: 'codex', model: { name: 'gpt-6-mini' } } } });
+  });
+
+  it('names the labels it kept when another scorer of the pass needs a model the local tool has none for', async () => {
+    const config = fixture(scorer(0));
+    fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'extra.md'), extra.replace('samplingRate: 0', 'samplingRate: 0\nmodel: fast'));
+    fs.mkdirSync(path.join(config.repo.localPath, 'models'));
+    fs.writeFileSync(path.join(config.repo.localPath, 'models', 'aliases.yaml'), 'aliases:\n  fast:\n    codex: gpt-6-mini\n');
+    const runId = await settledRun(config);
+    fakeClaude(config);
+    vi.stubEnv('PATH', [path.join(config.projectRoot ?? '', 'bin'), '/usr/bin', '/bin'].join(path.delimiter));
+    const subject = { runId, step: 'review', pass: 1 };
+
+    expect(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['quality', 'extra'] })).toEqual({ error: {
+      code: 'judge_model_unavailable',
+      message: 'Scorer "extra" asks for model alias "fast", which has no model for claude in models/aliases.yaml. Add one, or remove model from the scorer. Kept the label of quality: good.',
+      labels: [expect.objectContaining({ scorer: 'quality', subject, label: 'good' })],
+    } });
+    expect(labelsOf(config)).toEqual([expect.objectContaining({ scorer: 'quality', subject, label: 'good' })]);
+  });
+
+  it('says the evidence is empty when a pass on demand recorded nothing to judge', async () => {
+    const config = fixture(scorer(0));
+    await syncWorkflowDefinitions(config);
+    const runId = String(data(await startRun(config, 'review')).run);
+    const work = z.object({ attempt: z.string(), revision: z.number() }).parse(data(await leaseNext(config, runId, workDriver)).lease);
+    data(await reportAttempt(config, runId, { ...work, outcome: 'success', driver: workDriver }));
+    fakeClaude(config);
+
+    expect(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['quality'] })).toMatchObject({ error: { code: 'evidence_empty' } });
+  });
+
+  it('queues a pass sampling skipped for any driver, the scorers of a batch as one lease', async () => {
+    const config = fixture(scorer(0));
+    fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'extra.md'), extra);
+    const runId = await settledRun(config);
+    const subject = { runId, step: 'review', pass: 1 };
+
+    expect(data(await scoreOnDemand(config, { run: runId, step: 'review', pass: 1, scorers: ['quality', 'extra'], queue: true, batch: true }))).toEqual({
+      queued: [{ scorer: 'quality', subject }, { scorer: 'extra', subject }],
+    });
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+    expect(lease).toMatchObject({ scorers: ['extra', 'quality'], batched: true, subject });
+    expect(fs.readFileSync(lease.prompt, 'utf8')).toContain('Judge the extra.');
+    data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: { quality: { label: 'good', reasoning: 'r' }, extra: { label: 'missed', reasoning: 'r' } } }));
+    expect(labelsOf(config)).toEqual([
+      expect.objectContaining({ scorer: 'extra', label: 'missed', subject }),
+      expect.objectContaining({ scorer: 'quality', label: 'good', subject }),
+    ]);
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 } });
+  });
+
+  it('reopens a failed or an expired entry only when asked', async () => {
+    const config = fixture(scorer(100));
+    const runId = await settledRun(config);
+    const failed = leaseOf(await nextJudgeLease(config, request()));
+    data(await submitJudgeLease(config, failed.ref, { driver: judgeDriver, outcome: 'failed' }));
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 } });
+    data(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['quality'], queue: true }));
+    const again = leaseOf(await nextJudgeLease(config, request()));
+    expect(again.ref).not.toBe(failed.ref);
+    expect(data(await submitJudgeLease(config, again.ref, success()))).toMatchObject({ label: { label: 'good' } });
+
+    const old = fixture(scorer(100));
+    const oldRun = await settledRun(old);
+    const later = new Date(Date.parse((await runOf(old, oldRun)).updatedAt) + 15 * 24 * 60 * 60 * 1000).toISOString();
+    expect(data(await nextJudgeLease(old, request(), later))).toEqual({ idle: { open: 0, leased: 0 } });
+    data(await scoreOnDemand(old, { run: oldRun, step: 'review', scorers: ['quality'], queue: true }, later));
+    const reopened = leaseOf(await nextJudgeLease(old, request(), later));
+    expect(data(await submitJudgeLease(old, reopened.ref, success(), later))).toMatchObject({ label: { label: 'good' } });
+  });
+
+  it('sweeps rubrics no attempt names, requests of closed entries and raw output of replaced attempts, and keeps labels', async () => {
+    const config = fixture(scorer(0));
+    const runId = await settledRun(config);
+    const scores = path.join(config.dataHome ?? '', 'scores');
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('2.1.308 (Claude Code)'); process.exit(); }
+process.stdin.resume(); process.stdin.on('end', () => console.log(JSON.stringify({ type: 'result', structured_output: { label: 'great', reasoning: 'r' } })));\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+    const orphan = path.join(scores, 'rubrics', `${'f'.repeat(64)}.json`);
+    fs.mkdirSync(path.dirname(orphan), { recursive: true });
+    fs.writeFileSync(orphan, JSON.stringify({ sourceHash: 'f'.repeat(64), content: 'old' }));
+    data(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['quality'], queue: true }, '2026-10-23T10:00:00.000Z'));
+    const first = leaseOf(await nextJudgeLease(config, request(), '2026-10-23T10:01:00.000Z'));
+    expect(await runJudgeLease(config, first.ref, { driver: judgeDriver })).toMatchObject({ error: { code: 'judge_answer_invalid' } });
+    const [entry = '', attempt = ''] = first.ref.split('/');
+    expect(fs.existsSync(path.join(scores, 'raw', `${attempt}.txt`))).toBe(true);
+    data(await submitJudgeLease(config, first.ref, { driver: judgeDriver, outcome: 'released' }, '2026-10-23T10:02:00.000Z'));
+    const second = leaseOf(await nextJudgeLease(config, request(), '2026-10-23T10:03:00.000Z'));
+    const labelled = data(await submitJudgeLease(config, second.ref, success(), '2026-10-23T10:04:00.000Z'));
+
+    expect(data(await nextJudgeLease(config, request(), '2026-10-23T10:05:00.000Z'))).toEqual({ idle: { open: 0, leased: 0 } });
+
+    expect(fs.existsSync(orphan)).toBe(false);
+    expect(fs.readdirSync(path.join(scores, 'rubrics'))).toHaveLength(1);
+    expect(fs.existsSync(path.join(scores, 'raw', `${attempt}.txt`))).toBe(false);
+    expect(fs.existsSync(path.join(scores, 'attempts', entry, 'request.json'))).toBe(false);
+    expect(labelsOf(config)).toHaveLength(1);
+    expect(fs.existsSync(z.object({ reasoning: z.string() }).parse(labelled.label).reasoning)).toBe(true);
+    expect(data(await submitJudgeLease(config, second.ref, success(), '2026-10-23T10:06:00.000Z'))).toEqual(labelled);
+  });
+
+  it('settles a live lease with its own rubric after another request takes the scorer\'s new one', async () => {
+    const config = fixture(scorer(0));
+    fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'extra.md'), extra);
+    const runId = await settledRun(config);
+    data(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['extra'], queue: true }, '2026-10-23T10:00:00.000Z'));
+    const lease = leaseOf(await nextJudgeLease(config, request(), '2026-10-23T10:01:00.000Z'));
+    fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'extra.md'), extra.replace('value: good', 'value: excellent'));
+    await syncWorkflowDefinitions(config);
+    data(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['extra'], queue: true }, '2026-10-23T10:02:00.000Z'));
+
+    expect(data(await submitJudgeLease(config, lease.ref, success(), '2026-10-23T10:03:00.000Z'))).toMatchObject({ label: { scorer: 'extra', label: 'good' } });
+  });
+
+  it('hands back a live lease with its own rubric after a pull changed the scorer', async () => {
+    const config = fixture(scorer(0));
+    fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'extra.md'), extra);
+    const runId = await settledRun(config);
+    data(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['extra'], queue: true }, '2026-10-23T10:00:00.000Z'));
+    const lease = leaseOf(await nextJudgeLease(config, request(), '2026-10-23T10:01:00.000Z'));
+    fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'extra.md'), extra.replace('value: good', 'value: excellent'));
+    await syncWorkflowDefinitions(config);
+    data(await scoreOnDemand(config, { run: runId, step: 'review', scorers: ['extra'], queue: true }, '2026-10-23T10:02:00.000Z'));
+    const back = leaseOf(await nextJudgeLease(config, request(), '2026-10-23T10:03:00.000Z'));
+
+    expect(back).toMatchObject({ ref: lease.ref, handedBack: true, rubric: lease.rubric, answer: lease.answer });
+    expect(fs.readFileSync(back.prompt, 'utf8')).not.toContain('excellent');
+    expect(data(await submitJudgeLease(config, back.ref, success(), '2026-10-23T10:04:00.000Z'))).toMatchObject({ label: { scorer: 'extra', label: 'good' } });
+  });
+
+  it('settles a live lease with its own rubric after the run pins the scorer again', async () => {
+    const config = fixture(scorer(100));
+    const runId = await settledRun(config);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+    const file = path.join(config.dataHome ?? '', 'workflows', 'runs', `${runId}.json`);
+    const run = z.object({ scorers: z.record(z.object({ sourceHash: z.string(), content: z.string() })) }).passthrough().parse(JSON.parse(fs.readFileSync(file, 'utf8')));
+    const content = scorer(100).replace('value: good', 'value: excellent');
+    fs.writeFileSync(file, JSON.stringify({ ...run, scorers: { quality: { sourceHash: 'f'.repeat(64), content } } }));
+
+    expect(data(await submitJudgeLease(config, lease.ref, success()))).toMatchObject({ label: { scorer: 'quality', label: 'good' } });
+  });
+
+  it('labels a copied scorer with the team revision its run pinned', async () => {
+    const config = fixture(scorer(100));
+    const cwd = config.repo.localPath;
+    const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    const origin = path.join(config.projectRoot ?? '', 'origin.git');
+    execFileSync('git', ['init', '--bare', '-q', origin]);
+    git('init', '-q');
+    git('config', 'user.name', 'T');
+    git('config', 'user.email', 't@example.test');
+    git('add', '.');
+    git('commit', '-qm', 'quality');
+    git('remote', 'add', 'origin', origin);
+    git('push', '-qu', 'origin', 'HEAD');
+    await settledRun(config);
+    data(await submitJudgeLease(config, leaseOf(await nextJudgeLease(config, request())).ref, success()));
+    fs.copyFileSync(path.join(cwd, 'scorers', 'quality.md'), path.join(cwd, 'scorers', 'tests.md'));
+    fs.writeFileSync(path.join(cwd, 'workflows', 'review.yaml'), WORKFLOW.replace('[quality, nope]', '[tests]'));
+    git('add', '.');
+    git('commit', '-qm', 'tests');
+    git('push', '-q');
+    const runId = await settledRun(config);
+    data(await submitJudgeLease(config, leaseOf(await nextJudgeLease(config, request())).ref, success()));
+
+    const label = (await LabelStore.local(config)).find((one) => one.source === 'workflow' && one.subject.runId === runId);
+    expect(label).toMatchObject({ scorer: 'tests', rubric: { teamRevision: git('rev-parse', 'HEAD') } });
+  });
+
+  it('names the valid runs, steps, passes and scorers when one is unknown', async () => {
+    const config = fixture(scorer(0));
+    const runId = await settledRun(config);
+    const ask = (demand: Partial<Parameters<typeof scoreOnDemand>[1]>) =>
+      scoreOnDemand(config, { run: runId, step: 'review', scorers: ['quality'], queue: true, ...demand });
+
+    expect(await ask({ run: 'r0000000000000000' })).toMatchObject({ error: { code: 'run_not_found', message: expect.stringContaining(runId) } });
+    expect(await ask({ step: 'nope' })).toMatchObject({ error: { code: 'step_not_found', message: expect.stringContaining('review') } });
+    expect(await ask({ pass: 2 })).toMatchObject({ error: { code: 'pass_not_found', message: expect.stringContaining('Succeeded passes: 1') } });
+    expect(await ask({ scorers: ['nope'] })).toMatchObject({ error: { code: 'scorer_not_found', message: expect.stringContaining('quality') } });
+    expect(fs.existsSync(path.join(config.dataHome ?? '', 'scores', 'attempts'))).toBe(false);
   });
 });
 

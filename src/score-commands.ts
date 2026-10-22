@@ -1,6 +1,7 @@
 import { autoDetectInit } from './config.js';
+import type { LocalConfig } from './types.js';
 import { setStderrOnly } from './utils/logger.js';
-import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, runJudgeLease, submitJudgeLease } from './workflow/scoring.js';
+import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, runJudgeLease, scoreOnDemand, submitJudgeLease, type ScoreDemand } from './workflow/scoring.js';
 import type { WorkflowEnvelope } from './workflow/types.js';
 
 export interface ScoreOptions {
@@ -9,6 +10,12 @@ export interface ScoreOptions {
   submit?: boolean;
   json?: string;
   stdin?: boolean;
+  run?: string;
+  step?: string;
+  pass?: string;
+  scorer?: string[];
+  queue?: boolean;
+  batch?: boolean;
 }
 
 function writeEnvelope(envelope: WorkflowEnvelope): void {
@@ -37,18 +44,48 @@ async function payloadOf(options: ScoreOptions): Promise<{ ok: true; value: unkn
   }
 }
 
+/** The on-demand request `--run` asks for, or the failure that says what is missing. */
+function demandOf(options: ScoreOptions): ScoreDemand | WorkflowEnvelope {
+  if (options.next || options.lease !== undefined || options.json !== undefined || options.stdin) {
+    return failure('invalid_arguments', '--run takes no --next, --lease or payload: teamai score --run <id> --step <path> [--pass <n>] --scorer <name> [--queue] [--batch]');
+  }
+  const [scorer, ...scorers] = options.scorer ?? [];
+  if (options.run === undefined || options.step === undefined || scorer === undefined) {
+    return failure('invalid_arguments', 'Pass --run <id> --step <path> --scorer <name> to judge a pass on demand; --pass <n> picks a pass, else the latest that succeeded');
+  }
+  const pass = options.pass === undefined ? undefined : Number(options.pass);
+  if (pass !== undefined && (!/^\d+$/.test(options.pass ?? '') || !Number.isSafeInteger(pass) || pass < 1)) {
+    return failure('invalid_pass', 'Pass --pass as a positive integer: the pass of the step to judge');
+  }
+  return {
+    run: options.run, step: options.step, scorers: [scorer, ...scorers],
+    ...(pass !== undefined ? { pass } : {}), ...(options.queue ? { queue: true } : {}), ...(options.batch ? { batch: true } : {}),
+  };
+}
+
+async function localConfig(): Promise<{ ok: true; config: LocalConfig } | { ok: false; envelope: WorkflowEnvelope }> {
+  try {
+    return { ok: true, config: (await autoDetectInit()).localConfig };
+  } catch (e) {
+    return { ok: false, envelope: failure('not_initialized', e instanceof Error ? e.message : String(e)) };
+  }
+}
+
 async function score(options: ScoreOptions): Promise<WorkflowEnvelope> {
+  if (options.run !== undefined || options.step !== undefined || options.pass !== undefined || options.scorer?.length || options.queue || options.batch) {
+    const demand = demandOf(options);
+    if (!('run' in demand)) return demand;
+    const loaded = await localConfig();
+    return loaded.ok ? scoreOnDemand(loaded.config, demand) : loaded.envelope;
+  }
   if (options.next === (options.lease !== undefined)) {
-    return failure('invalid_arguments', 'Pass --next to take judge work, --lease <ref> to judge it here, or --lease <ref> --submit to settle it');
+    return failure('invalid_arguments', 'Pass --next to take judge work, --lease <ref> to judge it here, --lease <ref> --submit to settle it, or --run <id> --step <path> --scorer <name> to judge a pass on demand');
   }
   const payload = await payloadOf(options);
   if (!payload.ok) return payload.envelope;
-  let config;
-  try {
-    config = (await autoDetectInit()).localConfig;
-  } catch (e) {
-    return failure('not_initialized', e instanceof Error ? e.message : String(e));
-  }
+  const loaded = await localConfig();
+  if (!loaded.ok) return loaded.envelope;
+  const { config } = loaded;
   if (options.next) {
     const request = parseJudgeRequest(payload.value);
     return typeof request === 'string' ? failure('invalid_json', request) : nextJudgeLease(config, request);

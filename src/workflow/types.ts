@@ -293,10 +293,10 @@ export interface CachedWorkflow {
 
 export type WorkflowEnvelope =
   | { data: Record<string, unknown> }
-  | { error: { code: string; message: string } };
+  | { error: { code: string; message: string; labels?: Array<Record<string, unknown>> } };
 
 export function isWorkflowError(
   envelope: WorkflowEnvelope,
-): envelope is { error: { code: string; message: string } } {
+): envelope is Extract<WorkflowEnvelope, { error: unknown }> {
   return 'error' in envelope;
 }

@@ -1,6 +1,7 @@
 /**
  * Real CLI against a local bare team repo: an external JSON driver runs a scored workflow to its end with workflow next
  * and report, then takes the judge work with score --next and settles it with score --lease --submit for a fake judge.
+ * The member then asks for the pass again with score --run --queue.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -80,7 +81,7 @@ describe('teamai score with an external driver', () => {
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it('settles the run first, then leases, refuses a bad label, and publishes the label without the judge\'s words', async () => {
+  it('settles the run first, then leases, refuses a bad label, publishes the label without the judge\'s words, and queues the pass again on demand', async () => {
     const knowledge = path.join(root, 'knowledge');
     const team = path.join(root, 'team.git');
     fs.mkdirSync(path.join(knowledge, 'workflows'), { recursive: true });
@@ -153,5 +154,20 @@ describe('teamai score with an external driver', () => {
     expect(() => git(team, 'grep', '-q', PHRASE, 'teamai-reports')).toThrow();
     expect(filesContaining(path.join(dataHome, 'workflows'), PHRASE)).toEqual([]);
     expect(filesContaining(path.join(dataHome, 'scores'), PHRASE)).toEqual([expect.stringMatching(/scores\/reasoning\/[0-9a-f]{64}\.md$/)]);
+
+    // On demand: the member queues the labelled pass again, and a driver whose judge only answers takes it.
+    const queued = await runCLI(['score', '--run', runId, '--step', 'review', '--scorer', 'review-quality', '--queue'], app, env);
+    expect(queued.code, queued.stdout + queued.stderr).toBe(0);
+    expect(envelope(queued.stdout).data).toEqual({ queued: [{ scorer: 'review-quality', subject: { runId, step: 'review', pass: 1 } }] });
+    const answering = { driver: { ...driver, can: { judge: { isolation: 'verified', access: 'answer', tools: ['claude'] } } }, running: [] };
+    const again = JudgeLeaseSchema.parse(envelope((await runCLI(['score', '--next', '--json', JSON.stringify(answering)], app, env)).stdout).data?.lease);
+    expect(again).toMatchObject({ subject: { runId, step: 'review', pass: 1 }, judge: { access: 'answer' } });
+    const rescored = await runCLI(['score', '--lease', again.ref, '--submit', '--stdin'], app, env, answer('shallow'));
+    expect(envelope(rescored.stdout).data, rescored.stdout + rescored.stderr).toMatchObject({ label: { label: 'shallow' } });
+    const latest = fs.readFileSync(path.join(dataHome, 'scores', 'labels.jsonl'), 'utf8').trim().split('\n').at(-1) ?? '{}';
+    expect(JSON.parse(latest)).toMatchObject({ label: 'shallow', judge: { kind: 'model', tool: 'claude', access: 'answer' } });
+    const unknown = await runCLI(['score', '--run', runId, '--step', 'nope', '--scorer', 'review-quality'], app, env);
+    expect(unknown.code).toBe(1);
+    expect(envelope(unknown.stdout).error).toMatchObject({ code: 'step_not_found', message: expect.stringContaining('plan, review') });
   });
 });

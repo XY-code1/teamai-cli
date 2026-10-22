@@ -38,8 +38,30 @@ export function isJudgeTool(value: string): value is JudgeTool {
   return (JUDGE_TOOLS as readonly string[]).includes(value);
 }
 
+/** The judge tools on this machine's PATH: `preferred` first, then the rest in launch-tool order. */
+export function installedJudgeTools(preferred: readonly string[], { resolveTool = resolveCliPath }: { resolveTool?: (tool: string) => string | null } = {}): JudgeTool[] {
+  const tools = new Set([...preferred, ...JUDGE_TOOLS].filter(isJudgeTool));
+  return [...tools].filter((tool) => resolveTool(tool) !== null);
+}
+
 function judgeFamily(tool: JudgeTool): keyof typeof TOOL_ENV {
   return tool === 'codebuddy' ? 'codebuddy' : localToolFamily(tool);
+}
+
+function profileIsolation(tool: JudgeTool, version: string, insideCheckout: boolean): Isolation {
+  return VERIFIED[judgeFamily(tool)]?.test(version) && !insideCheckout ? 'verified' : 'best-effort';
+}
+
+/** Each judge tool on PATH, its version, and the isolation its judge profile reaches on this machine. */
+export async function judgeToolLevels({ resolveTool = resolveCliPath }: { resolveTool?: (tool: string) => string | null } = {}): Promise<Array<{ tool: JudgeTool; version: string; isolation: Isolation }>> {
+  const tmp = await fs.realpath(os.tmpdir());
+  return Promise.all(installedJudgeTools([], { resolveTool }).flatMap((tool) => {
+    const executable = resolveTool(tool);
+    return executable === null ? [] : [(async () => {
+      const version = await probeBinary(executable, ['--version'], (command, args, options) => execCommand(command, args, { ...options, env: judgeEnv(tool), cwd: tmp }));
+      return { tool, version, isolation: profileIsolation(tool, version, judgeFamily(tool) === 'opencode' && await insideCheckout(tmp)) };
+    })()];
+  }));
 }
 
 export interface JudgeInput {
@@ -237,7 +259,7 @@ export async function runLocalJudge(input: JudgeInput, { resolveTool = resolveCl
     const version = await probeBinary(executable, ['--version'], (command, args, options) => execCommand(command, args, { ...options, env, cwd: tmp }));
     const cwd = family === 'opencode' ? path.join(tmp, 'evidence') : evidence;
     const checkout = family === 'opencode' && await insideCheckout(cwd);
-    let isolation: Isolation = VERIFIED[family]?.test(version) && !checkout ? 'verified' : 'best-effort';
+    let isolation = profileIsolation(input.tool, version, checkout);
     if (input.isolation === 'verified' && isolation !== 'verified') {
       return { ok: false, code: 'judge_tool_unavailable', message: checkout
         ? `OpenCode would judge evidence inside the checkout above ${cwd}, which it lets its file tools read. Move the temp dir (TMPDIR) outside any git or hg checkout, or use another driver.`

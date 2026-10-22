@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { parse as parseToml } from 'smol-toml';
-import { runLocalJudge } from '../scorers/judge.js';
+import { installedJudgeTools, runLocalJudge } from '../scorers/judge.js';
 
 let root = '';
 afterEach(async () => { vi.unstubAllEnvs(); if (root) await fs.rm(root, { recursive: true, force: true }); });
@@ -296,4 +296,10 @@ else { fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify(JSON.parse(fs.
 
   expect(result).toMatchObject({ ok: true, judge: { tool } });
   expect(await fs.readFile(record, 'utf8')).toBe(tool === 'codex-internal' ? content : '{"ANTHROPIC_BASE_URL":"https://variant.test"}');
+});
+
+it('offers every launch tool on PATH as a judge, the preferred one first', () => {
+  const onPath = new Set(['tclaude', 'codex-internal', 'codebuddy']);
+
+  expect(installedJudgeTools(['codebuddy'], { resolveTool: (tool) => onPath.has(tool) ? `/bin/${tool}` : null })).toEqual(['codebuddy', 'tclaude', 'codex-internal']);
 });

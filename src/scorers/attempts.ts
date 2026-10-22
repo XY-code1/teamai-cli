@@ -1,6 +1,8 @@
 /**
  * Judge attempts: `<dataHome>/scores/attempts/<entryId>/<attemptId>.json`, one file per lease, rewritten when it settles.
  * Attempts hold codes, numbers and the label chosen, never the judge's reasoning. One lock serializes every change to them.
+ * The text of each rubric a lease was taken with is kept by its hash in `<dataHome>/scores/rubrics/`; the attempt says
+ * which revision and file it was pinned from, since one text may be pinned from many.
  */
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -11,9 +13,14 @@ import { getDataHome, type LocalConfig } from '../types.js';
 import { acquireLock, releaseLock } from '../update.js';
 import { readFileSafe, writeJsonAtomic } from '../utils/fs.js';
 import { ACCESS_LEVELS, ISOLATIONS, JudgeUsageSchema, RunSubjectSchema } from './label.js';
+import { PinnedScorerSchema } from './pin.js';
 
 const ENTRY_ID = /^s[0-9a-f]{13}$/;
 const ATTEMPT_ID = /^a[0-9a-f]{8}$/;
+const SOURCE_HASH = /^[0-9a-f]{64}$/;
+
+const RubricSchema = PinnedScorerSchema.pick({ sourceHash: true, content: true });
+type Rubric = z.infer<typeof RubricSchema>;
 
 /** Why a judge attempt closed without a label. */
 export const JUDGE_FAILURES = ['judge_failed', 'lease_expired', 'evidence_empty', 'judge_answer_invalid', 'judge_tool_unavailable'] as const;
@@ -36,7 +43,7 @@ const AttemptBase = {
   attempt: z.string().regex(ATTEMPT_ID),
   entry: z.string().regex(ENTRY_ID),
   scorer: z.string().min(1),
-  rubric: z.object({ sourceHash: z.string().min(1) }),
+  rubric: PinnedScorerSchema.omit({ content: true }),
   subject: RunSubjectSchema,
   driver: DriverSchema,
   judge: JudgeChoiceSchema,
@@ -64,6 +71,21 @@ export type AttemptRecord = z.infer<typeof AttemptRecordSchema>;
 export type LeasedAttempt = Extract<AttemptRecord, { status: 'leased' }>;
 export type SucceededAttempt = Extract<AttemptRecord, { status: 'succeeded' }>;
 
+/**
+ * `<entryId>/request.json`: a member asked for this (scorer, pass) to be judged, whatever sampling says. Attempts and
+ * labels older than `requestedAt` no longer close the entry. `pin` is the rubric that judges it.
+ */
+export const ScoreRequestSchema = z.object({
+  entry: z.string().regex(ENTRY_ID),
+  scorer: z.string().min(1),
+  subject: RunSubjectSchema,
+  pin: PinnedScorerSchema,
+  requestedAt: z.string(),
+  /** `--batch`: whether this pass's scorers share one judge call, over what the step says. */
+  batch: z.boolean().optional(),
+});
+export type ScoreRequest = z.infer<typeof ScoreRequestSchema>;
+
 export function newAttemptId(): string {
   return `a${randomBytes(4).toString('hex')}`;
 }
@@ -76,14 +98,23 @@ function attemptsDir(config: LocalConfig): string {
   return path.join(scoresDir(config), 'attempts');
 }
 
+function rubricPath(config: LocalConfig, sourceHash: string): string {
+  return path.join(scoresDir(config), 'rubrics', `${sourceHash}.json`);
+}
+
+/** What a local judge printed when its answer did not settle the lease. */
+export function rawOutputPath(config: LocalConfig, attempt: string): string {
+  return path.join(scoresDir(config), 'raw', `${attempt}.txt`);
+}
+
 const LOCK_ATTEMPTS = 40;
 const LOCK_WAIT_MS = 25;
 
-async function readAttempt(file: string): Promise<AttemptRecord | undefined> {
+async function readRecord<T>(file: string, schema: z.ZodType<T>): Promise<T | undefined> {
   const raw = await readFileSafe(file);
   if (raw === null) return undefined;
   try {
-    const parsed = AttemptRecordSchema.safeParse(JSON.parse(raw));
+    const parsed = schema.safeParse(JSON.parse(raw));
     return parsed.success ? parsed.data : undefined;
   } catch {
     return undefined;
@@ -107,18 +138,67 @@ export const AttemptStore = {
   async ofEntry(config: LocalConfig, entry: string): Promise<AttemptRecord[]> {
     const dir = path.join(attemptsDir(config), entry);
     const files = (await listDir(dir)).filter((name) => ATTEMPT_ID.test(name.replace(/\.json$/, '')) && name.endsWith('.json'));
-    const records = await Promise.all(files.map((name) => readAttempt(path.join(dir, name))));
+    const records = await Promise.all(files.map((name) => readRecord(path.join(dir, name), AttemptRecordSchema)));
     return records.filter((record): record is AttemptRecord => record !== undefined && record.entry === entry);
   },
 
   async get(config: LocalConfig, entry: string, attempt: string): Promise<AttemptRecord | undefined> {
     if (!ENTRY_ID.test(entry) || !ATTEMPT_ID.test(attempt)) return undefined;
-    const record = await readAttempt(path.join(attemptsDir(config), entry, `${attempt}.json`));
+    const record = await readRecord(path.join(attemptsDir(config), entry, `${attempt}.json`), AttemptRecordSchema);
     return record?.entry === entry && record.attempt === attempt ? record : undefined;
   },
 
   async write(config: LocalConfig, record: AttemptRecord): Promise<void> {
     await writeJsonAtomic(path.join(attemptsDir(config), record.entry, `${record.attempt}.json`), record);
+  },
+
+  /** Every readable request. */
+  async requests(config: LocalConfig): Promise<ScoreRequest[]> {
+    const entries = (await listDir(attemptsDir(config))).filter((name) => ENTRY_ID.test(name));
+    const requests = await Promise.all(entries.map((entry) => AttemptStore.request(config, entry)));
+    return requests.filter((request): request is ScoreRequest => request !== undefined);
+  },
+
+  async request(config: LocalConfig, entry: string): Promise<ScoreRequest | undefined> {
+    if (!ENTRY_ID.test(entry)) return undefined;
+    const request = await readRecord(path.join(attemptsDir(config), entry, 'request.json'), ScoreRequestSchema);
+    return request?.entry === entry ? request : undefined;
+  },
+
+  async writeRequest(config: LocalConfig, request: ScoreRequest): Promise<void> {
+    await writeJsonAtomic(path.join(attemptsDir(config), request.entry, 'request.json'), request);
+  },
+
+  /** Keeps the text a lease judges with under `scores/rubrics/<sourceHash>.json`, so a later pin cannot take it away. */
+  async keepRubric(config: LocalConfig, { sourceHash, content }: Rubric): Promise<void> {
+    if (!SOURCE_HASH.test(sourceHash) || await readFileSafe(rubricPath(config, sourceHash)) !== null) return;
+    await writeJsonAtomic(rubricPath(config, sourceHash), { sourceHash, content } satisfies Rubric);
+  },
+
+  async rubric(config: LocalConfig, sourceHash: string): Promise<Rubric | undefined> {
+    if (!SOURCE_HASH.test(sourceHash)) return undefined;
+    const rubric = await readRecord(rubricPath(config, sourceHash), RubricSchema);
+    return rubric?.sourceHash === sourceHash ? rubric : undefined;
+  },
+
+  /** Removes the request of an entry that closed, unless a newer request reopened it since `requestedAt`. Call under `locked`. */
+  async closeRequest(config: LocalConfig, entry: string, requestedAt: string): Promise<void> {
+    if ((await AttemptStore.request(config, entry))?.requestedAt === requestedAt) await fs.rm(path.join(attemptsDir(config), entry, 'request.json'), { force: true });
+  },
+
+  /** Removes rubrics no attempt names and the raw output of attempts a newer attempt of their entry replaced. Call under `locked`. */
+  async sweep(config: LocalConfig): Promise<void> {
+    const attempts = [...(await AttemptStore.read(config)).values()];
+    const named = new Set(attempts.flat().map((attempt) => attempt.rubric.sourceHash));
+    const latest = new Set(attempts.flatMap((ofEntry) => ofEntry.reduce<AttemptRecord | undefined>((newest, attempt) => (newest && newest.leasedAt >= attempt.leasedAt ? newest : attempt), undefined)?.attempt ?? []));
+    const remove = async (dir: string, pattern: RegExp, keep: ReadonlySet<string>) => {
+      for (const name of await listDir(dir)) {
+        const id = pattern.exec(name)?.[1];
+        if (id !== undefined && !keep.has(id)) await fs.rm(path.join(dir, name), { force: true });
+      }
+    };
+    await remove(path.join(scoresDir(config), 'rubrics'), /^([0-9a-f]{64})\.json$/, named);
+    await remove(path.join(scoresDir(config), 'raw'), /^(a[0-9a-f]{8})\.txt$/, latest);
   },
 
   /** Runs `change` under `scores/attempts.lock`; `change` re-reads what it decides on. */

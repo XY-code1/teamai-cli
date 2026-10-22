@@ -2,12 +2,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { localAliasesPath } from '../models/aliases.js';
+import { syncWorkflowDefinitions } from '../workflow/cache.js';
 import { scorerNotes } from '../doctor-scorers.js';
 import type { LocalConfig } from '../types.js';
 
 const dirs: string[] = [];
 
 afterEach(() => {
+  fs.rmSync(localAliasesPath(), { force: true });
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -43,7 +46,7 @@ describe('scorerNotes', () => {
     const inRepo = { ...config, dataHome: path.join(config.projectRoot ?? '', '.teamai') };
 
     expect(await scorerNotes(inRepo)).toEqual([expect.stringMatching(/^Scoring is off for this project: its teamai data is still in .*\.teamai, inside the repository.*Run teamai pull/)]);
-    expect(await scorerNotes(config)).toEqual(['Scoring isolation: best-effort, the default.']);
+    expect(await scorerNotes(config, { resolveTool: () => null })).toEqual(['Scoring isolation: best-effort, the default.', 'Judge tools here: none on PATH. Install Claude Code, Codex, OpenCode or CodeBuddy to judge on this machine.']);
   });
 
   it.each([
@@ -54,14 +57,53 @@ describe('scorerNotes', () => {
   ])('prints the isolation every judge needs and what sets it: %s %o', async (scoring, machine, line) => {
     const config = { ...teamRepo({ 'scorers/q.md': SCORER, 'teamai.yaml': `team: t\nrepo: https://example.test/t.git\n${scoring}` }), ...machine };
 
-    expect(await scorerNotes(config)).toEqual([line]);
+    expect(await scorerNotes(config, { resolveTool: () => null })).toEqual([line, 'Judge tools here: none on PATH. Install Claude Code, Codex, OpenCode or CodeBuddy to judge on this machine.']);
   });
 
   it('names each scorer file that asks for more isolation than the team and this machine', async () => {
     const verified = SCORER.replace('passingScore: 0.5', 'passingScore: 0.5\nisolation: verified');
     const config = teamRepo({ 'scorers/q.md': SCORER, 'scorers/ops/strict.md': verified, 'scorers/strict-too.md': verified });
 
-    expect(await scorerNotes(config)).toEqual(['Scoring isolation: best-effort, the default. scorers/ops/strict.md and scorers/strict-too.md ask for verified for their own work.']);
+    expect(await scorerNotes(config, { resolveTool: () => null })).toEqual(['Scoring isolation: best-effort, the default. scorers/ops/strict.md and scorers/strict-too.md ask for verified for their own work.', 'Judge tools here: none on PATH. Install Claude Code, Codex, OpenCode or CodeBuddy to judge on this machine.']);
+  });
+
+  it('warns about a cached scorer whose alias no installed judge tool maps, and notes one the member sends to the tool default', async () => {
+    const config = teamRepo({
+      'scorers/q.md': SCORER.replace('passingScore: 0.5', 'passingScore: 0.5\nmodel: fast'),
+      'scorers/r.md': SCORER.replace('passingScore: 0.5', 'passingScore: 0.5\nmodel: strong'),
+      'scorers/s.md': SCORER.replace('passingScore: 0.5', 'passingScore: 0.5\nmodel: claude-haiku-4-5'),
+      'models/aliases.yaml': 'aliases:\n  fast:\n    codex: gpt-6-mini\n  strong:\n    claude: opus\n',
+    });
+    await syncWorkflowDefinitions(config);
+    fs.mkdirSync(path.dirname(localAliasesPath()), { recursive: true });
+    fs.writeFileSync(localAliasesPath(), 'aliases:\n  strong:\n    claude: ~\n');
+
+    expect(await scorerNotes(config, { resolveTool: (tool) => (tool === 'claude' ? '/bin/claude' : null) })).toEqual([
+      'Scoring isolation: best-effort, the default.',
+      'Judge tools here: claude (version unknown) is best-effort.',
+      'Scorer "q" asks for model alias "fast", which has no model for claude in models/aliases.yaml. Add one, or remove model from the scorer.',
+      `Scorer "r" asks for model alias "strong", which ${localAliasesPath()} turns off for claude, so claude judges with its default model.`,
+    ]);
+  });
+
+  it('lists the judge tools on this machine next to the isolation, with the level each profile reaches', async () => {
+    const config = teamRepo({ 'scorers/q.md': SCORER });
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    const fake = (name: string, version: string) => {
+      fs.writeFileSync(path.join(bin, name), `#!${process.execPath}\nconsole.log(${JSON.stringify(version)});\n`, { mode: 0o755 });
+      return path.join(bin, name);
+    };
+    const onPath: Record<string, string> = { claude: fake('claude', '2.1.308 (Claude Code)'), codex: fake('codex', 'codex-cli 9.9.9') };
+
+    expect(await scorerNotes(config, { resolveTool: (tool) => onPath[tool] ?? null })).toEqual([
+      'Scoring isolation: best-effort, the default.',
+      'Judge tools here: claude 2.1.308 (Claude Code) is verified, codex codex-cli 9.9.9 is best-effort.',
+    ]);
+    expect(await scorerNotes(config, { resolveTool: () => null })).toEqual([
+      'Scoring isolation: best-effort, the default.',
+      'Judge tools here: none on PATH. Install Claude Code, Codex, OpenCode or CodeBuddy to judge on this machine.',
+    ]);
   });
 
   it('says nothing when every scorer is valid and known', async () => {

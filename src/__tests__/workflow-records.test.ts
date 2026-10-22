@@ -217,7 +217,9 @@ describe('#1083 workflow run records', () => {
       // Work the driver's judge tools cannot run the scorer's model for; it stays open for another driver.
       'judge_model_unavailable',
       // Refusals of a teamai score command line before it reads any judge work.
-      'invalid_arguments', 'not_initialized',
+      'invalid_arguments', 'invalid_pass', 'not_initialized',
+      // Refusals of teamai score --run, answered to the member who asked for a pass to be judged.
+      'scoring_unavailable', 'pass_not_found', 'scorer_not_found', 'entry_leased',
       // Why a judge attempt closed: kept with the attempt under scores/, never on a run.
       ...JUDGE_FAILURES];
     const src = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');

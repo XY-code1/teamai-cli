@@ -76,6 +76,14 @@ export async function loadCachedScorer(config: LocalConfig, name: string): Promi
   return { ...rest, definition: parsed.definition };
 }
 
+/** The names of the scorers with a valid cached version, sorted. */
+export async function cachedScorerNames(config: LocalConfig): Promise<string[]> {
+  const files = await fs.readdir(cacheDir(config)).catch(() => []);
+  const names = files.filter((file) => file.endsWith('.json')).map((file) => file.slice(0, -'.json'.length)).sort();
+  const valid = await Promise.all(names.map(async (name) => (await loadCachedScorer(config, name)) !== null));
+  return names.filter((_, index) => valid[index]);
+}
+
 /** The scorers among `names` that have a valid cached version, pinned as they are cached now. A name without one is left out (D19). */
 export async function pinScorers(config: LocalConfig, names: Iterable<string>): Promise<Record<string, PinnedScorer>> {
   const pins: Record<string, PinnedScorer> = {};

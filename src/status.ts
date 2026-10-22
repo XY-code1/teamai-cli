@@ -26,6 +26,7 @@ import { resolveTeamHookEntries } from './resources/hooks.js';
 import { envEntryReader } from './resources/env.js';
 import { envListing } from './env-listing.js';
 import { resolveTeamEnv } from './env-resolution.js';
+import { cachedScorerNames } from './scorers/cache.js';
 import {
   describeEntryFailure, describeOrigin, describeOrigins, reportUndeliveredEntryNotices, resolveEntriesFor,
   type EntryResolution, type EntryType,
@@ -134,6 +135,8 @@ export async function status(options: GlobalOptions): Promise<void> {
   for (const type of RESOURCE_TYPES) {
     console.log(`  ${type}: ${counts[type] ?? 0}${origins[type] ?? ''}`);
   }
+  const scorers = await cachedScorerNames(localConfig);
+  console.log(`  scorers: ${scorers.length}${scorers.length > 0 ? ` (${scorers.join(', ')})` : ''}`);
 
   // Local pushable items
   console.log('');

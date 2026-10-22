@@ -71,7 +71,7 @@ export interface ReportInput {
 }
 
 /** A protocol rejection that retains its actionable code and message. */
-export function error(code: string, message: string): { error: { code: string; message: string } } {
+export function error(code: string, message: string): Extract<WorkflowEnvelope, { error: unknown }> {
   return { error: { code, message } };
 }
 

@@ -66,6 +66,10 @@ describe('entryState', () => {
     ['failed on the fourth lapse', { ...facts, attempts: ['a00000001', 'a00000002', 'a00000003', 'a00000004'].map((id) => leased(id, minutes(-1))) }, 'failed'],
     ['open 13 days after the run last changed', { ...facts, subjectChangedAt: days(-13) }, 'open'],
     ['expired 14 days after the run last changed', { ...facts, subjectChangedAt: days(-14) }, 'expired'],
+    ['open when asked after a model label', { ...facts, labels: [label('model')], requestedAt: minutes(1), now: minutes(2) }, 'open'],
+    ['open when asked after a failed attempt', { ...facts, attempts: [{ ...leased('a00000001', minutes(-30)), status: 'failed', settledAt: minutes(-40), code: 'judge_failed' }], requestedAt: minutes(-1) }, 'open'],
+    ['open when asked 14 days after the run last changed', { ...facts, subjectChangedAt: days(-14), requestedAt: minutes(-1) }, 'open'],
+    ['leased when asked while a lease is live', { ...facts, attempts: [leased('a00000001', minutes(10))], requestedAt: minutes(-1) }, 'leased'],
   ] as const)('is %s', (_name, input, kind) => {
     expect(entryState(input).kind).toBe(kind);
   });

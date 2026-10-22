@@ -49,14 +49,18 @@ export function hasLapsed(attempt: AttemptRecord, now: string): boolean {
 /**
  * The state of one entry, first match wins: a model label or a succeeded attempt, a live lease, a failed attempt, too
  * many lapsed leases, a run that last changed outside the window, else open. A hand label never closes a model entry.
+ * A request (`requestedAt`) sets aside the labels and settled attempts before it, and opens a new window.
  */
 export function entryState(facts: {
   labels: readonly ScoreLabel[];
   attempts: readonly AttemptRecord[];
   subjectChangedAt: string;
+  requestedAt?: string;
   now: string;
 }): EntryState {
-  const { labels, attempts, now } = facts;
+  const { now, requestedAt = '' } = facts;
+  const labels = facts.labels.filter((label) => label.scoredAt >= requestedAt);
+  const attempts = facts.attempts.filter((attempt) => attempt.leasedAt >= requestedAt || (attempt.status === 'leased' && !hasLapsed(attempt, now)));
   if (labels.some((label) => label.judge.kind === 'model') || attempts.some((attempt) => attempt.status === 'succeeded')) {
     return { kind: 'labelled' };
   }
@@ -65,6 +69,6 @@ export function entryState(facts: {
   const failed = attempts.find((attempt) => attempt.status === 'failed');
   if (failed?.status === 'failed') return { kind: 'failed', code: failed.code };
   if (attempts.filter((attempt) => hasLapsed(attempt, now)).length > LEASE_LAPSES_ALLOWED) return { kind: 'failed', code: 'lease_expired' };
-  if (Date.parse(facts.subjectChangedAt) + ENTRY_WINDOW_MS <= Date.parse(now)) return { kind: 'expired' };
+  if (Math.max(Date.parse(facts.subjectChangedAt), Date.parse(requestedAt) || 0) + ENTRY_WINDOW_MS <= Date.parse(now)) return { kind: 'expired' };
   return { kind: 'open' };
 }
