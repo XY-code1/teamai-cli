@@ -117,7 +117,7 @@ describe('teamai score with an external driver', () => {
       done = next.data?.done;
       const lease = z.object({ attempt: z.string(), revision: z.number() }).optional().parse(next.data?.lease);
       if (!lease) continue;
-      const reported = envelope((await runCLI(['workflow', 'report', runId, '--json', JSON.stringify({ attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver })], app, env)).stdout);
+      const reported = envelope((await runCLI(['workflow', 'report', runId, '--json', JSON.stringify({ attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver, outputs: { reviewed: true } })], app, env)).stdout);
       expect(reported.data, JSON.stringify(reported)).toMatchObject({ accepted: true });
     }
     expect(done).toMatchObject({ outcome: 'succeeded' });

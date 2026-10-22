@@ -73,3 +73,17 @@ JSON
 工作流运行页面显示每一轮的标签，以及评审开销，与运行本身的 token 分开统计。本机的运行统计每一次评审尝试；成员发布的运行只统计产生了标签的评审。
 
 `score --next` 准备 `evidence.json`、`prompt.md`、有记录范围时的 `diff.patch`、`repo/`、`transcripts/` 和 `outputs.json`。仓库包含被评判提交中的跟踪文件，符号链接的目标以文本保存。会话记录包含可读取的子代理并经过脱敏。缺失证据以 gap 代码列出。租约结算或过期后删除证据。
+
+## 在本机评判
+
+```sh
+teamai score --lease "$REF" --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work"}}'
+```
+
+该命令运行租约选定的工具，并通过所有 driver 共用的提交路径记录标签。运行失败时租约保持开放。
+
+Claude 使用受限的读取配置。Codex 使用临时主目录，其权限配置只允许 shell 读取证据，禁止网络和写入。OpenCode 以 standalone 模式运行，使用独立的配置、数据库和数据目录，不读取项目配置，禁止命令、编辑、网页和目录外访问；读取结果后删除评判会话及其子会话。CodeBuddy 只开放只读工具，不加载 MCP，不保存会话；它没有受限模式，因此保持 `best-effort`；未登录的 CodeBuddy 以 `judge_tool_unavailable` 失败。Claude、Codex 和 OpenCode 的标签记录 `access: read`，CodeBuddy 记录 `access: full`，因为无论 `--tools` 如何设置，它都会列出约 70 个工具。提示通过标准输入或文件传入。保留工具登录和受支持的模型切换设置。没有已验证配置的版本标记为 `best-effort`，不能评判要求 `verified` 的 scorer。
+
+对于 scorer 的模型别名，按声明顺序选用首个能解析它的工具。成员选定的本地默认值或启用的模型切换使用工具默认值。未映射或无法读取的别名以 `judge_model_unavailable` 关闭条目，不改变工作流结果。标签记录工具报告的模型；未报告时记录显式请求的具体模型。失败的评判输出仅保存在本机 `<dataHome>/scores/raw/`。
+
+已验证版本：Claude Code 2.1.308、codex-cli 0.163.0 和 OpenCode v2.1.2。只有评判所用的临时目录不在任何 git 或 hg 检出内时，OpenCode 才是 `verified`，因为在检出内它的文件工具可能读取整个检出。

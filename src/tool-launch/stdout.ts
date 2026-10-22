@@ -1,4 +1,4 @@
-import { localToolFamily, type LocalWorkflowTool } from './tools.js';
+import { localToolFamily, type LaunchTool } from './tools.js';
 
 export interface TokenUsage {
   input?: number;
@@ -129,7 +129,7 @@ function readToolMetadata(stdout: string): ToolReport | null {
   return found;
 }
 
-export function toolStdout(tool: LocalWorkflowTool, stdout: string): ToolReport | null {
+export function toolStdout(tool: LaunchTool, stdout: string): ToolReport | null {
   if (localToolFamily(tool) === 'claude') return claudeStdout(stdout);
   return readToolMetadata(stdout);
 }

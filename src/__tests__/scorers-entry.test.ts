@@ -12,7 +12,7 @@ const days = (count: number): string => new Date(Date.parse(now) + count * 24 * 
 function leased(attempt: string, expiresAt: string): AttemptRecord {
   return {
     status: 'leased', attempt, entry: entryIdOf('q', subject), scorer: 'q', rubric: { sourceHash: 'h' }, subject,
-    driver: { kind: 't3', machine: 'm', workspace: '/w' }, judge: { tools: ['claude'], isolation: 'verified', access: 'read' },
+    driver: { kind: 't3', machine: 'm', workspace: '/w' }, judge: { tool: 'claude', by: 'tool_default', isolation: 'verified', access: 'read' },
     leasedAt: minutes(-60), expiresAt,
   };
 }

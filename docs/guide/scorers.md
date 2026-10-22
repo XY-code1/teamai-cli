@@ -73,3 +73,17 @@ Where labels go:
 Workflow Runs shows each pass's labels, and what judging cost apart from the run's own tokens. For a run on this machine that counts every judge attempt; for a run a member published, only the labelled ones.
 
 `score --next` prepares `evidence.json`, `prompt.md`, `diff.patch` when a range was recorded, `repo/`, `transcripts/`, and `outputs.json`. The repository contains tracked files at the judged commit, with symlink targets stored as text. Transcripts include readable subagents and are redacted. Missing evidence is listed as gap codes. Evidence is removed when the lease settles or lapses.
+
+## Judge locally
+
+```sh
+teamai score --lease "$REF" --json '{"driver":{"kind":"t3","machine":"m1","workspace":"/work"}}'
+```
+
+This runs the tool the lease names and records the label through the same submit path as any driver. A failed run leaves the lease open.
+
+Claude uses a restricted read profile. Codex runs with a temporary home whose permission profile lets its shell read only the evidence, with no network and no writes. OpenCode runs standalone with isolated settings, database and data dirs, no project config, and denied command, edit, web, and external-directory permissions; its judge session and child sessions are deleted after reading. CodeBuddy runs with read-only tools, no MCP and no saved session; it has no restricted mode, so it stays `best-effort`, and a CodeBuddy that is not signed in fails `judge_tool_unavailable`. Labels record `access: read` for Claude, Codex and OpenCode, and `access: full` for CodeBuddy, which lists about 70 tools whatever `--tools` says. Prompts travel through stdin or a file. Tool login and supported model-switch settings are retained. A version without a verified profile is marked `best-effort`; it cannot serve a scorer that requires `verified`.
+
+For a scorer's model alias, the first declared tool that resolves it wins. A member's local default or active model switch uses the tool default. An unmapped or unreadable alias closes the entry with `judge_model_unavailable`, without changing the workflow result. The label records the model the tool reports, or the concrete model requested when none is reported. Failed judge output stays locally under `<dataHome>/scores/raw/`.
+
+Verified versions: Claude Code 2.1.308, codex-cli 0.163.0, and OpenCode v2.1.2. OpenCode is `verified` only when the temp dir it judges in is outside any git or hg checkout, because inside one its file tools may read the whole checkout.

@@ -1,6 +1,6 @@
 import { autoDetectInit } from './config.js';
 import { setStderrOnly } from './utils/logger.js';
-import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, submitJudgeLease } from './workflow/scoring.js';
+import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, runJudgeLease, submitJudgeLease } from './workflow/scoring.js';
 import type { WorkflowEnvelope } from './workflow/types.js';
 
 export interface ScoreOptions {
@@ -39,10 +39,7 @@ async function payloadOf(options: ScoreOptions): Promise<{ ok: true; value: unkn
 
 async function score(options: ScoreOptions): Promise<WorkflowEnvelope> {
   if (options.next === (options.lease !== undefined)) {
-    return failure('invalid_arguments', 'Pass --next to take judge work, or --lease <ref> --submit to settle it');
-  }
-  if (options.lease !== undefined && !options.submit) {
-    return failure('local_judge_unavailable', 'This teamai cannot run a judge itself yet. Run your own judge on the lease prompt, then: teamai score --lease <ref> --submit --stdin');
+    return failure('invalid_arguments', 'Pass --next to take judge work, --lease <ref> to judge it here, or --lease <ref> --submit to settle it');
   }
   const payload = await payloadOf(options);
   if (!payload.ok) return payload.envelope;
@@ -56,6 +53,7 @@ async function score(options: ScoreOptions): Promise<WorkflowEnvelope> {
     const request = parseJudgeRequest(payload.value);
     return typeof request === 'string' ? failure('invalid_json', request) : nextJudgeLease(config, request);
   }
+  if (options.lease !== undefined && !options.submit) return runJudgeLease(config, options.lease, payload.value);
   const submission = parseJudgeSubmission(payload.value);
   if (typeof submission === 'string') return failure('invalid_json', submission);
   return submitJudgeLease(config, options.lease ?? '', submission);

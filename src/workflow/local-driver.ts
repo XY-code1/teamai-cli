@@ -34,7 +34,7 @@ import {
 } from './local-tool-adapter.js';
 import { driverLockPath, isRunId, readRun, updateRun } from './store.js';
 import { stopProcess } from '../tool-launch/process-stop.js';
-import { isLocalWorkflowTool, localToolFamily, type LocalWorkflowTool } from '../tool-launch/tools.js';
+import { isLaunchTool, localToolFamily, type LaunchTool } from '../tool-launch/tools.js';
 import { chooseStepModel } from './step-model.js';
 import type { StepRead } from './step-state.js';
 import type { DriverIdentity, StepHitl, WorkflowEnvelope, WorkflowFailure } from './types.js';
@@ -187,8 +187,8 @@ function resultPath(config: LocalConfig, runId: string, attempt: string): string
   return path.join(getDataHome(config), 'workflows', 'runs', runId, 'attempts', attempt, 'result.json');
 }
 
-function supportedTool(value: string): value is LocalWorkflowTool {
-  return isLocalWorkflowTool(value);
+function supportedTool(value: string): value is LaunchTool {
+  return isLaunchTool(value);
 }
 
 function ignoredCodexSettings(agent: AgentSpec): string[] {
@@ -196,12 +196,12 @@ function ignoredCodexSettings(agent: AgentSpec): string[] {
   return agent.tools?.length ? ['tools', ...extras] : extras;
 }
 
-function definitionRun(tool: LocalWorkflowTool, name: string, agent: AgentSpec): NonNullable<LocalToolRun['agent']> {
+function definitionRun(tool: LaunchTool, name: string, agent: AgentSpec): NonNullable<LocalToolRun['agent']> {
   const settings = localToolFamily(tool) === 'opencode' ? toolExtrasFor(agent, 'opencode') : undefined;
   return { name, instructions: agent.instructions, ...(agent.model ? { model: agent.model } : {}), ...(settings ? { settings } : {}) };
 }
 
-function reverseAgent(tool: LocalWorkflowTool, file: string, content: string) {
+function reverseAgent(tool: LaunchTool, file: string, content: string) {
   const family = localToolFamily(tool);
   if (family === 'claude') return reverseFromClaude(file, content);
   if (family === 'codex') return reverseFromCodex(file, content);
@@ -210,7 +210,7 @@ function reverseAgent(tool: LocalWorkflowTool, file: string, content: string) {
 
 /** A deployed agent and the file it was read from, which is the key its pull recorded it under. */
 async function loadAgent(
-  tool: LocalWorkflowTool,
+  tool: LaunchTool,
   name: string,
   config: LocalConfig,
   toolPaths: TeamaiConfig['toolPaths'] | undefined,
@@ -480,7 +480,7 @@ async function deliverTeamAssets(dir: string): Promise<void> {
  * continued, newest first. Each is tried on this machine, then as a copy in this tool, then as a copy of the one the team
  * session archive holds. OpenCode has no flag to resume one, so its step starts a new session.
  */
-async function resumeSession(archive: SessionArchive, lease: Lease, tool: LocalWorkflowTool, cwd: string): Promise<{ id: string; resumed: SessionRef } | undefined> {
+async function resumeSession(archive: SessionArchive, lease: Lease, tool: LaunchTool, cwd: string): Promise<{ id: string; resumed: SessionRef } | undefined> {
   const to = AgentSession.platformForTool(tool);
   if (!lease.session || !to) return undefined;
   const resumes = localToolFamily(tool) !== 'opencode';

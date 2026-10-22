@@ -419,6 +419,7 @@ export async function hookDispatchCli(
   matcher: string,
   options: { bgOnly?: boolean; copilotGlobal?: string; stdinFile?: string; hookArgs?: string[] } = {},
 ): Promise<void> {
+  if (process.env.TEAMAI_LAUNCHED_BY === 'scorer') return;
   const { bgOnly = false, stdinFile } = options;
   setStderrOnly(true);
   if (claudeHookRunsInAnotherHost(tool, process.env, false)) {

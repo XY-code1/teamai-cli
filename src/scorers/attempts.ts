@@ -16,15 +16,18 @@ const ENTRY_ID = /^s[0-9a-f]{13}$/;
 const ATTEMPT_ID = /^a[0-9a-f]{8}$/;
 
 /** Why a judge attempt closed without a label. */
-export const JUDGE_FAILURES = ['judge_failed', 'lease_expired', 'evidence_empty'] as const;
+export const JUDGE_FAILURES = ['judge_failed', 'lease_expired', 'evidence_empty', 'judge_answer_invalid', 'judge_tool_unavailable'] as const;
 export type JudgeFailureCode = (typeof JUDGE_FAILURES)[number];
 
 export type JudgeDriver = z.infer<typeof DriverSchema>;
 
-/** The tools the driver declared, in its order; the label names the one that judged. */
 const JudgeChoiceSchema = z.object({
-  tools: z.array(z.string().min(1)).min(1),
-  model: z.string().min(1).optional(),
+  tool: z.string().min(1),
+  model: z.object({ name: z.string().min(1), effort: z.string().optional() }).optional(),
+  by: z.enum(['scorer', 'tool_default']),
+  noModel: z.enum(['local', 'switched']).optional(),
+  /** The scorer's `model` when it is an alias, also when the tool default judges in its place. */
+  alias: z.string().optional(),
   isolation: z.enum(ISOLATIONS),
   access: z.enum(ACCESS_LEVELS),
 });
@@ -39,8 +42,10 @@ const AttemptBase = {
   judge: JudgeChoiceSchema,
   leasedAt: z.string(),
   expiresAt: z.string(),
+  /** What the lease's judge calls spent so far, on the first scorer of a batch only; a failed local call adds to it. */
+  usage: JudgeUsageSchema.optional(),
 };
-const Settled = { ...AttemptBase, settledAt: z.string(), usage: JudgeUsageSchema.optional() };
+const Settled = { ...AttemptBase, settledAt: z.string() };
 
 export const AttemptRecordSchema = z.discriminatedUnion('status', [
   z.object({ ...AttemptBase, status: z.literal('leased') }),

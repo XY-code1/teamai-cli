@@ -1,13 +1,15 @@
+import type { ToolId } from '../types.js';
+
 /** The AI coding tools TeamAI launches headless, and the family whose flags and output each one shares. */
-const LOCAL_WORKFLOW_TOOLS = ['claude', 'claude-internal', 'tclaude', 'codex', 'codex-internal', 'tcodex', 'opencode'] as const;
+export const LAUNCH_TOOLS = ['claude', 'claude-internal', 'tclaude', 'codex', 'codex-internal', 'tcodex', 'opencode'] as const satisfies readonly ToolId[];
 
-export type LocalWorkflowTool = (typeof LOCAL_WORKFLOW_TOOLS)[number];
+export type LaunchTool = (typeof LAUNCH_TOOLS)[number];
 
-export function isLocalWorkflowTool(value: string): value is LocalWorkflowTool {
-  return (LOCAL_WORKFLOW_TOOLS as readonly string[]).includes(value);
+export function isLaunchTool(value: string): value is LaunchTool {
+  return (LAUNCH_TOOLS as readonly string[]).includes(value);
 }
 
-export function localToolFamily(tool: LocalWorkflowTool): 'claude' | 'codex' | 'opencode' {
+export function localToolFamily(tool: LaunchTool): 'claude' | 'codex' | 'opencode' {
   if (tool === 'codex' || tool === 'codex-internal' || tool === 'tcodex') return 'codex';
   if (tool === 'opencode') return 'opencode';
   return 'claude';

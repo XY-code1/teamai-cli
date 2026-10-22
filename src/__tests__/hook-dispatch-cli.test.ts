@@ -58,6 +58,17 @@ describe('deriveDispatchSessionId', () => {
 });
 
 describe('hookDispatchCli', () => {
+  it('skips scorer hooks before reading stdin or resolving config, including background children', async () => {
+    const resolveConfig = vi.spyOn(await import('../dashboard-collector.js'), 'resolveHookConfig');
+    const readFile = vi.spyOn(fs, 'readFileSync');
+    vi.stubEnv('TEAMAI_LAUNCHED_BY', 'scorer');
+    try {
+      for (const bgOnly of [false, true]) await hookDispatchCli('SessionStart', 'claude', '*', { bgOnly, stdinFile: '/missing-judge-payload' });
+      expect(resolveConfig).not.toHaveBeenCalled();
+      expect(readFile).not.toHaveBeenCalledWith('/missing-judge-payload', expect.anything());
+    } finally { resolveConfig.mockRestore(); readFile.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
   it('records why a Git hook cannot sync an unreadable project config, without dispatching', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-hook-broken-config-'));
     const previousCwd = process.cwd();

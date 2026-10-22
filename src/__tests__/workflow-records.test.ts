@@ -214,10 +214,10 @@ describe('#1083 workflow run records', () => {
       'stale_revision', 'wrong_driver', 'run_settled', 'step_not_found', 'not_hitl', 'not_waiting', 'invalid_choice', 'not_cancellable', 'not_retryable',
       // Refusals of a judge submit, answered to the driver; the lease and the run stay as they were.
       'lease_unknown', 'lease_settled', 'entry_closed', 'label_invalid',
+      // Work the driver's judge tools cannot run the scorer's model for; it stays open for another driver.
+      'judge_model_unavailable',
       // Refusals of a teamai score command line before it reads any judge work.
       'invalid_arguments', 'not_initialized',
-      // teamai score --lease without --submit, until this teamai can run a judge itself.
-      'local_judge_unavailable',
       // Why a judge attempt closed: kept with the attempt under scores/, never on a run.
       ...JUDGE_FAILURES];
     const src = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -231,7 +231,7 @@ describe('#1083 workflow run records', () => {
       ...[...text.matchAll(/(?<!function )\b(?:error|failure)\('([^']+)'/g)].flatMap((match) => match[1] ?? []),
     ]));
     // An `error(…)` whose code is not a literal passes on a code written as a literal elsewhere; each one is named here.
-    const passedOn = ['workflow/engine.ts: tree.failed.code'];
+    const passedOn = ['workflow/engine.ts: tree.failed.code', 'workflow/scoring.ts: built.code', 'workflow/scoring.ts: result.code'];
     const unnamed = files.flatMap(({ file, text }) => [...text.matchAll(/(?<!function )\b(?:error|failure)\((?!')([^,)]+)/g)].map((match) => `${file}: ${match[1]}`));
     const failedWith = (code: string): RunState => runState({
       status: 'failed',

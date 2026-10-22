@@ -10,7 +10,7 @@ import { writeJsonAtomic } from '../utils/fs.js';
 import { log } from '../utils/logger.js';
 import { stopProcess } from '../tool-launch/process-stop.js';
 import { toolStdout, type TokenUsage, type ToolReport } from '../tool-launch/stdout.js';
-import { localToolFamily, opencodeModelArgs, type LocalWorkflowTool } from '../tool-launch/tools.js';
+import { localToolFamily, opencodeModelArgs, type LaunchTool } from '../tool-launch/tools.js';
 import type { WorkflowFailure } from './types.js';
 
 export interface LocalToolRun {
@@ -46,9 +46,9 @@ export type LocalToolResult =
   | { started: false; exitCode: number; failure: WorkflowFailure };
 
 export interface LocalToolAdapter {
-  run(tool: LocalWorkflowTool, input: LocalToolRun, signal?: AbortSignal): Promise<LocalToolResult>;
+  run(tool: LaunchTool, input: LocalToolRun, signal?: AbortSignal): Promise<LocalToolResult>;
   /** Opens a foreground tool for a person, with an optional structured result. */
-  runInteractive(tool: LocalWorkflowTool, input: LocalToolRun, signal?: AbortSignal): Promise<LocalToolResult>;
+  runInteractive(tool: LaunchTool, input: LocalToolRun, signal?: AbortSignal): Promise<LocalToolResult>;
 }
 
 export type ToolSpawn = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
@@ -62,12 +62,12 @@ function resultInstruction(input: LocalToolRun, prompt: string): string {
 }
 
 /** Codex, and OpenCode 1 for a subagent, which `opencode run --agent` does not start, get the definition's instructions in the prompt. */
-function promptHandoff(tool: LocalWorkflowTool, input: LocalToolRun, opencodeMajor: number): boolean {
+function promptHandoff(tool: LaunchTool, input: LocalToolRun, opencodeMajor: number): boolean {
   const family = localToolFamily(tool);
   return family === 'codex' || (family === 'opencode' && opencodeMajor < 2 && input.agent?.settings?.['mode'] === 'subagent');
 }
 
-function invocation(tool: LocalWorkflowTool, input: LocalToolRun, opencodeMajor: number, interactive: boolean): string[] {
+function invocation(tool: LaunchTool, input: LocalToolRun, opencodeMajor: number, interactive: boolean): string[] {
   const family = localToolFamily(tool);
   const viaPrompt = promptHandoff(tool, input, opencodeMajor);
   const agentPrompt = input.agent?.instructions
@@ -147,7 +147,7 @@ export function createLocalToolAdapter(
   resolveTool: ToolResolve = resolveCliPath,
 ): LocalToolAdapter {
   const launch =
-    async (tool: LocalWorkflowTool, input: LocalToolRun, signal: AbortSignal | undefined, interactive: boolean): Promise<LocalToolResult> => {
+    async (tool: LaunchTool, input: LocalToolRun, signal: AbortSignal | undefined, interactive: boolean): Promise<LocalToolResult> => {
       await fs.mkdir(path.dirname(input.resultPath), { recursive: true });
       const executable = resolveTool(tool);
       if (!executable) {

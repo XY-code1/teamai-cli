@@ -20,7 +20,7 @@ import type { LocalConfig } from '../types.js';
 import { getDataHome, isUsageReportEnabled } from '../types.js';
 import { log } from '../utils/logger.js';
 import { acquireLock, releaseLock } from '../update.js';
-import { isLocalWorkflowTool } from '../tool-launch/tools.js';
+import { isLaunchTool } from '../tool-launch/tools.js';
 import { stepDefinitions } from './scope.js';
 import { snapshotPath } from './snapshot.js';
 import { installOwner, runLockPath } from './store.js';
@@ -193,7 +193,7 @@ export function buildEndRecord(
       ...(reported?.answer ? { answer: { choice: reported.answer.choice, channel: reported.answer.channel, agent: reported.answer.agent } } : {}),
       pass: pass ?? 1,
       ...(agent ? { agent } : {}),
-      ...(reported?.tool && isLocalWorkflowTool(reported.tool) ? { tool: reported.tool } : {}),
+      ...(reported?.tool && isLaunchTool(reported.tool) ? { tool: reported.tool } : {}),
       ...(reported?.model && isNameShaped(reported.model) ? { model: reported.model } : {}),
       ...(outcome ? { outcome } : {}),
       ...(reported?.tokens ? { tokens: reported.tokens } : {}),

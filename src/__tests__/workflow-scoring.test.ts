@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { localAliasesPath } from '../models/aliases.js';
 import { LabelStore } from '../scorers/label-store.js';
 import type { LocalConfig } from '../types.js';
 import { syncWorkflowDefinitions } from '../workflow/cache.js';
@@ -10,12 +11,13 @@ import { leaseNext, reportAttempt, startRun } from '../workflow/engine.js';
 import { workflowRunDetail } from '../dashboard/workflow-runs.js';
 import { buildEndRecord } from '../workflow/records.js';
 import { projectRun } from '../workflow/snapshot.js';
-import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, scoredPasses, submitJudgeLease, type JudgeRequest } from '../workflow/scoring.js';
+import { nextJudgeLease, parseJudgeRequest, parseJudgeSubmission, runJudgeLease, scoredPasses, submitJudgeLease, type JudgeRequest } from '../workflow/scoring.js';
 import { installOwner, readRun } from '../workflow/store.js';
 import type { DriverIdentity, RunState, WorkflowEnvelope } from '../workflow/types.js';
 
 const dirs: string[] = [];
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -87,6 +89,86 @@ async function settledRun(config: LocalConfig): Promise<string> {
 }
 
 describe('judge work', () => {
+  it('finalizes the selected Codex tool in the lease', async () => {
+    const config = fixture(scorer(100));
+    await settledRun(config);
+    expect(data(await nextJudgeLease(config, request({ judge: { isolation: 'best-effort', tools: ['codex'] } })))).toMatchObject({ lease: { judge: { tool: 'codex', by: 'tool_default' } } });
+  });
+
+  it('judges a lease with the local tool and settles it through the submit path with the access of the tool profile', async () => {
+    const config = fixture(scorer(100));
+    await settledRun(config);
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('2.1.308 (Claude Code)'); process.exit(); }
+process.stdin.resume(); process.stdin.on('end', () => {
+console.log(JSON.stringify({ type: 'system', subtype: 'init', model: 'judge-model' }));
+console.log(JSON.stringify({ type: 'result', structured_output: { label: 'good', reasoning: 'found the defect' } }));
+});\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+    expect(data(await runJudgeLease(config, lease.ref, { driver: judgeDriver }))).toMatchObject({ label: { label: 'good', score: 1, passed: true } });
+    const labels = fs.readFileSync(path.join(config.dataHome ?? '', 'scores', 'labels.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as unknown);
+    expect(labels).toEqual([expect.objectContaining({ judge: { kind: 'model', tool: 'claude', model: { reported: 'judge-model' }, isolation: 'verified', access: 'read' } })]);
+    expect(fs.existsSync(lease.evidence)).toBe(false);
+    expect(data(await nextJudgeLease(config, request()))).toMatchObject({ idle: { open: 0, leased: 0 } });
+  });
+
+  it('labels a best-effort lease judged locally with the isolation the local run measured', async () => {
+    const config = fixture(scorer(100));
+    await settledRun(config);
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('2.1.308 (Claude Code)'); process.exit(); }
+process.stdin.resume(); process.stdin.on('end', () => {
+console.log(JSON.stringify({ type: 'result', structured_output: { label: 'good', reasoning: 'found the defect' } }));
+});\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+    const lease = leaseOf(await nextJudgeLease(config, request({ judge: { isolation: 'best-effort', tools: ['claude'] } })));
+    data(await runJudgeLease(config, lease.ref, { driver: judgeDriver }));
+    expect((await LabelStore.local(config))[0]?.judge).toMatchObject({ isolation: 'verified' });
+  });
+
+  it('counts the tokens of a local judge call whose answer does not fit the lease', async () => {
+    const config = fixture(scorer(100));
+    const runId = await settledRun(config);
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('2.1.308 (Claude Code)'); process.exit(); }
+process.stdin.resume(); process.stdin.on('end', () => {
+console.log(JSON.stringify({ type: 'result', structured_output: { label: 'great', reasoning: 'r' }, usage: { input_tokens: 1200, output_tokens: 60 } }));
+});\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+
+    expect(await runJudgeLease(config, lease.ref, { driver: judgeDriver })).toMatchObject({ error: { code: 'judge_answer_invalid' } });
+    expect(await LabelStore.scoringTotal(config, runId, 'local')).toEqual({ judged: 1, inputTokens: 1200, outputTokens: 60 });
+
+    data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: { label: 'good', reasoning: 'r' }, judge: { usage: { inputTokens: 10, outputTokens: 2 } } }));
+    expect((await LabelStore.local(config))[0]?.judge).toMatchObject({ usage: { inputTokens: 1210, outputTokens: 62 } });
+    expect(await LabelStore.scoringTotal(config, runId, 'local')).toEqual({ judged: 1, inputTokens: 1210, outputTokens: 62 });
+  });
+
+  it('skips a scorer whose model the driver\'s tools cannot run, and leaves it open for a driver whose tools can', async () => {
+    const config = fixture(scorer(100).replace('samplingRate: 100', 'samplingRate: 100\nmodel: fast'));
+    fs.mkdirSync(path.join(config.repo.localPath, 'models'));
+    fs.writeFileSync(path.join(config.repo.localPath, 'models', 'aliases.yaml'), 'aliases:\n  fast:\n    codex: gpt-6-mini\n');
+    const runId = await settledRun(config);
+    const file = path.join(config.dataHome ?? '', 'workflows', 'runs', `${runId}.json`);
+    const before = fs.readFileSync(file, 'utf8');
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 1, leased: 0 }, skipped: [{
+      scorer: 'quality',
+      subject: { runId, step: 'review', pass: 1 },
+      code: 'judge_model_unavailable',
+      message: 'Scorer "quality" asks for model alias "fast", which has no model for claude in models/aliases.yaml. Add one, or remove model from the scorer.',
+    }] });
+    expect(data(await nextJudgeLease(config, request({ judge: { isolation: 'verified', tools: ['codex'] } })))).toMatchObject({ lease: { judge: { tool: 'codex', model: { name: 'gpt-6-mini' } } } });
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+  });
+
   it('pins the scorers a run lists at start, skipping one with no valid file', async () => {
     const config = fixture(scorer(100));
     const runId = await settledRun(config);
@@ -123,7 +205,7 @@ describe('judge work', () => {
     expect(lease).toMatchObject({
       scorer: 'quality',
       subject: { runId, step: 'review', pass: 1 },
-      judge: { tools: ['claude'], isolation: 'verified', access: 'full' },
+      judge: { tool: 'claude', by: 'tool_default', isolation: 'verified', access: 'full' },
       answer: { schema: { properties: { label: { enum: ['good', 'missed'] } } } },
       submit: `teamai score --lease ${lease.ref} --submit --stdin`,
     });
@@ -181,6 +263,16 @@ describe('judge work', () => {
     expect(data(await leaseNext(config, runId, workDriver))).toEqual(expect.objectContaining({ done: expect.anything() }));
     expect(await reportAttempt(config, runId, { attempt: lease.ref, revision: 1, outcome: 'success', driver: workDriver, outputs: { reviewed: true } }))
       .toMatchObject({ error: { code: 'judge_lease', message: expect.stringContaining(`teamai score --lease ${lease.ref} --submit`) } });
+  });
+
+  it('names the entry it closed for empty evidence in the next answer', async () => {
+    const config = fixture(scorer(100));
+    await syncWorkflowDefinitions(config);
+    const runId = String(data(await startRun(config, 'review')).run);
+    const work = z.object({ attempt: z.string(), revision: z.number() }).parse(data(await leaseNext(config, runId, workDriver)).lease);
+    data(await reportAttempt(config, runId, { ...work, outcome: 'success', driver: workDriver }));
+
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 }, closed: [{ ref: expect.stringMatching(/^s[0-9a-f]{13}\/a[0-9a-f]{8}$/), code: 'evidence_empty' }] });
   });
 
   it('offers nothing at samplingRate 0', async () => {
@@ -360,7 +452,7 @@ describe('scoredPasses', () => {
     expect(scoredPasses(looped, install)).toEqual([{ subject: { runId, step: 'check', pass: 1 }, scorers: ['quality'] }]);
     expect(scoredPasses(looped, 'elsewhere')).toEqual([]);
     // Taken here, then closed: the hand-built pass recorded nothing to judge.
-    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 } });
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 }, closed: [{ ref: expect.any(String), code: 'evidence_empty' }] });
   });
 
   it('scores the items of a for_each step, never the step that fans them out', async () => {
@@ -395,5 +487,68 @@ describe('run snapshot', () => {
     expect(JSON.stringify(projected.value)).not.toContain('Judge the review.');
     expect(projected.value.steps[0]).toMatchObject({ installId: (await installOwner(config)).id });
     expect(projected.value.archive[0]).toMatchObject({ within: { step: 'x', pass: 1 } });
+  });
+});
+
+describe('judge model identity', () => {
+  const withModel = (model: string) => scorer(100).replace('samplingRate: 100', `samplingRate: 100\nmodel: ${model}`);
+  const teamAliases = (config: LocalConfig, yaml: string) => {
+    fs.mkdirSync(path.join(config.repo.localPath, 'models'), { recursive: true });
+    fs.writeFileSync(path.join(config.repo.localPath, 'models', 'aliases.yaml'), yaml);
+  };
+  const labelsOf = (config: LocalConfig): unknown[] =>
+    fs.readFileSync(path.join(config.dataHome ?? '', 'scores', 'labels.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as unknown);
+
+  it('records the model the lease named and the scorer\'s alias on the label of a submission that names no model', async () => {
+    const config = fixture(withModel('fast'));
+    teamAliases(config, 'aliases:\n  fast:\n    claude: { model: haiku, effort: low }\n');
+    await settledRun(config);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+    expect(lease).toMatchObject({ judge: { tool: 'claude', model: { name: 'haiku', effort: 'low' }, by: 'scorer', alias: 'fast' } });
+
+    data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: { label: 'good', reasoning: 'r' } }));
+
+    expect(labelsOf(config)).toEqual([expect.objectContaining({
+      judge: { kind: 'model', tool: 'claude', model: { requested: 'haiku', alias: 'fast' }, effort: { requested: 'low' }, isolation: 'verified', access: 'full' },
+    })]);
+  });
+
+  it('records what the local judge launched with, what its tool reports, and the scorer\'s alias', async () => {
+    const config = fixture(withModel('fast'));
+    teamAliases(config, 'aliases:\n  fast:\n    claude: { model: haiku, effort: low }\n');
+    await settledRun(config);
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    const argv = path.join(config.projectRoot ?? '', 'argv.json');
+    fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('2.1.308 (Claude Code)'); process.exit(); }
+require('node:fs').writeFileSync(${JSON.stringify(argv)}, JSON.stringify(process.argv.slice(2)));
+process.stdin.resume(); process.stdin.on('end', () => {
+console.log(JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-haiku-4-5' }));
+console.log(JSON.stringify({ type: 'result', structured_output: { label: 'good', reasoning: 'found it' } }));
+});\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+
+    data(await runJudgeLease(config, lease.ref, { driver: judgeDriver }));
+
+    expect(z.array(z.string()).parse(JSON.parse(fs.readFileSync(argv, 'utf8')))).toEqual(expect.arrayContaining(['--model', 'haiku', '--effort', 'low']));
+    expect(labelsOf(config)).toEqual([expect.objectContaining({
+      judge: { kind: 'model', tool: 'claude', model: { requested: 'haiku', reported: 'claude-haiku-4-5', alias: 'fast' }, effort: { requested: 'low' }, isolation: 'verified', access: 'read' },
+    })]);
+  });
+
+  it('keeps the alias on the lease and the label when the member\'s ~ entry sends the judge to its tool default', async () => {
+    const config = fixture(withModel('fast'));
+    teamAliases(config, 'aliases:\n  fast:\n    claude: haiku\n');
+    fs.mkdirSync(path.dirname(localAliasesPath()), { recursive: true });
+    fs.writeFileSync(localAliasesPath(), 'aliases:\n  fast:\n    claude: ~\n');
+    await settledRun(config);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+    expect(lease).toMatchObject({ judge: { tool: 'claude', by: 'tool_default', noModel: 'local', alias: 'fast' } });
+
+    data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: { label: 'good', reasoning: 'r' } }));
+
+    expect(labelsOf(config)).toEqual([expect.objectContaining({ judge: { kind: 'model', tool: 'claude', model: { alias: 'fast' }, isolation: 'verified', access: 'full' } })]);
   });
 });

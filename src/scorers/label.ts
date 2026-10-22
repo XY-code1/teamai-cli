@@ -20,6 +20,16 @@ export const JudgeUsageSchema = z.object({
 });
 export type JudgeUsage = z.infer<typeof JudgeUsageSchema>;
 
+/** The spend of two judge calls together; a cost in another unit than the first is kept as the second reports it. */
+export function sumUsage(first: JudgeUsage | undefined, second: JudgeUsage | undefined): JudgeUsage | undefined {
+  if (!first || !second) return first ?? second;
+  const tokens = (left?: number, right?: number) => (left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0));
+  const inputTokens = tokens(first.inputTokens, second.inputTokens);
+  const outputTokens = tokens(first.outputTokens, second.outputTokens);
+  const cost = first.cost && second.cost?.unit === first.cost.unit ? { amount: first.cost.amount + second.cost.amount, unit: first.cost.unit } : second.cost ?? first.cost;
+  return { ...(inputTokens !== undefined ? { inputTokens } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}), ...(cost ? { cost } : {}) };
+}
+
 export const ISOLATIONS = ['best-effort', 'verified'] as const;
 export type Isolation = (typeof ISOLATIONS)[number];
 export const ACCESS_LEVELS = ['answer', 'read', 'full'] as const;

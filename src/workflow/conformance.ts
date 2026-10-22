@@ -866,3 +866,32 @@ export const workflowGitConformanceScenarios: GitConformanceScenario[] = [
     expectPushed: { 'change.more': { 'elsewhere.txt': 'only on the other machine', 'write.txt': 'W', 'more.txt': 'M' } },
   },
 ];
+
+export const judgeLeaseConformanceScenario = {
+  name: 'a judge lease renews through running and settles only through score submission',
+  yaml: `schemaVersion: v1alpha1
+name: judged
+description: A pass with a quality scorer.
+steps:
+  - id: work
+    prompt: Review the change.
+    scorers: [quality]
+`,
+  scorer: `---
+labels:
+  - { value: good, score: 1, description: Did the work }
+  - { value: bad, score: 0, description: Missed the work }
+passingScore: 0.5
+samplingRate: 100
+---
+Judge the work.
+`,
+  operations: [
+    { kind: 'take', at: '2026-10-22T12:00:00.000Z', expect: { data: { lease: { expiresAt: '2026-10-22T12:30:00.000Z' } } } },
+    { kind: 'renew', at: '2026-10-22T12:20:00.000Z', expect: { data: { idle: { open: 0, leased: 1 } } } },
+    { kind: 'take', at: '2026-10-22T12:45:00.000Z', expect: { data: { lease: { expiresAt: '2026-10-22T12:50:00.000Z', handedBack: true } } } },
+    { kind: 'report', expect: { error: { code: 'judge_lease' } } },
+    { kind: 'submit', expect: { data: { label: { label: 'good', score: 1, passed: true } } } },
+    { kind: 'idle', at: '2026-10-22T12:46:00.000Z', expect: { data: { idle: { open: 0, leased: 0 } } } },
+  ],
+} as const;

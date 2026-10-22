@@ -187,7 +187,7 @@ export const LabelStore = {
         for (const attempt of attempts) {
           if (attempt.subject.runId !== runId) continue;
           total.judged += 1;
-          if (attempt.status !== 'leased') addUsage(total, attempt.usage);
+          addUsage(total, attempt.usage);
         }
       }
       return total;
