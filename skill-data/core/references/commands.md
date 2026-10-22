@@ -243,6 +243,15 @@ Generated: do not edit by hand. Regenerate with
     - `--sessions` — Also put the agent sessions that the run's unsettled steps continue (session: continue or session.from) in the team session archive, scrubbed, so whoever continues the run resumes them; listed in the envelope as sessions. Without it, those steps start new sessions on another machine
   - `teamai workflow cancel <run> [step]` — Cancel a whole run, or a pending, waiting, leased, or running step and its open descendants. Invalidates leases; drivers stop tools listed in next.cancelled. Prints one JSON envelope.
 
+## score
+
+- `teamai score` — Judge workflow passes with team scorers (scorers/<name>.md). Any driver takes judge work with --next, runs its own judge on the lease prompt with the lease evidence directory as its only readable root, and settles it with --lease <ref> --submit. workflow next never hands out judge work, and a driver never lists a judge ref in workflow next running. Prints one JSON envelope.
+  - `--next` — Take judge work: a lease with ref, scorer, subject, evidence, prompt, answer.schema, expiresAt and a submit command line, or idle with counts. --json {"driver":{"kind":"t3","machine":"host","workspace":"/work","can":{"judge":{"isolation":"verified","access":"read","tools":["claude"]}}},"running":["<ref>"]}. isolation is verified or best-effort; access is what your judge can do, answer (no tools), read (reads the evidence) or full (any tool), default full, and its labels record it; tools in your order of preference. running lists the judge refs you still run, which renews them; a live lease of yours left out is handed back. A lease lapses 30 minutes after it was taken or renewed.
+  - `--lease <ref>` — The judge lease to settle, as --next printed it (s<13 hex>/a<8 hex>)
+  - `--submit` — Settle --lease <ref> with the payload {"driver":{…same as --next…},"outcome":"success","answer":{"label":"<one of answer.schema>","reasoning":"…"},"judge":{"tool":"claude","model":"…","usage":{"inputTokens":0,"outputTokens":0}}}. outcome is success, failed, or released. A label the scorer does not list is refused and the lease stays open; teamai computes score and passed.
+  - `--json <payload>` — The payload as a JSON string
+  - `--stdin` — Read the payload from stdin
+
 ## hooks
 
 - `teamai hooks` — Manage teamai hooks in AI tool settings

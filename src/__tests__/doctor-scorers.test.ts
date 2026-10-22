@@ -36,6 +36,14 @@ describe('scorerNotes', () => {
     expect(fs.existsSync(config.dataHome ?? '')).toBe(false);
   });
 
+  it('says why scoring is off while the project keeps its data inside the repository', async () => {
+    const config = teamRepo({ 'scorers/q.md': '---\nlabels:\n  - { value: good, score: 1, description: Good }\n  - { value: bad, score: 0, description: Bad }\npassingScore: 0.5\n---\nJudge.\n' });
+    const inRepo = { ...config, dataHome: path.join(config.projectRoot ?? '', '.teamai') };
+
+    expect(await scorerNotes(inRepo)).toEqual([expect.stringMatching(/^Scoring is off for this project: its teamai data is still in .*\.teamai, inside the repository.*Run teamai pull/)]);
+    expect(await scorerNotes(config)).toEqual([]);
+  });
+
   it('says nothing when every scorer is valid and known', async () => {
     expect(await scorerNotes(teamRepo({}))).toEqual([]);
   });

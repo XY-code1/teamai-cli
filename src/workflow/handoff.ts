@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { collectTeamSecrets } from '../env-resolution.js';
+import { pinScorers } from '../scorers/cache.js';
 import { AgentSession } from '../session-flow/agent-session.js';
 import { archiveSessions, type ArchiveSessionRef } from '../session-flow/archive.js';
 import { usesBranchWorktree, type LocalConfig } from '../types.js';
@@ -744,12 +745,16 @@ async function install(
   handed: Handover,
 ): Promise<Result<ClaimReceipt>> {
   // Every published field comes from the body as it is; only what the snapshot rewrites or leaves out is rebuilt here.
-  const { definitionHash: _hash, copies: _copies, steps: _steps, ...body } = snapshotBody(snapshot);
+  const { definitionHash: _hash, copies: _copies, steps: _steps, scorers: published, ...body } = snapshotBody(snapshot);
+  // A pinned scorer comes back only when this machine caches the same bytes; otherwise its passes are not scored here (D19).
+  const cached = await pinScorers(config, Object.keys(published ?? {}));
+  const scorers = Object.fromEntries(Object.entries(cached).filter(([name, pin]) => published?.[name]?.sourceHash === pin.sourceHash));
   const run: RunState = {
     ...body,
     id: runId,
     definition: definitions.definition,
     ...(Object.keys(definitions.workflows).length > 0 ? { workflows: definitions.workflows } : {}),
+    ...(Object.keys(scorers).length > 0 ? { scorers } : {}),
     steps: handed.steps,
     settledAttempts: [],
     ...(Object.keys(handed.copies).length > 0 ? { copies: handed.copies } : {}),

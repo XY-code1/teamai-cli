@@ -1,4 +1,5 @@
 import { autoDetectInit } from './config.js';
+import { isLeaseRef } from './scorers/entry.js';
 import { log, setStderrOnly } from './utils/logger.js';
 import { leaseNext, parseNextPayload, parseReport, parseResponsePayload, reportAttempt, resumableSessions, startRun, withIgnored, type ParsedResponsePayload } from './workflow/engine.js';
 import { publishRun, resumeRun } from './workflow/handoff.js';
@@ -134,6 +135,10 @@ export async function workflowReport(runId: string, options: { json?: string }):
   const loaded = await readyConfig();
   if (!loaded) return;
   const { config } = loaded;
+  if (isLeaseRef(runId)) {
+    writeEnvelope({ error: { code: 'judge_lease', message: `${runId} is a judge lease, which workflow report does not settle. Submit its answer with: teamai score --lease ${runId} --submit --stdin` } });
+    return;
+  }
   const payload = readJson(options.json, 'Pass --json with attempt, revision, outcome, and driver');
   if (!payload.ok) {
     writeEnvelope(payload.envelope);

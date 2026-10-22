@@ -11,6 +11,7 @@ import { resolveNamespacedItems, type NamespaceCandidate } from '../namespace-re
 import { resolveResourceNamespaces } from '../resource-namespaces.js';
 import { remotelyReachableRevision, revisionHoldsSources, withoutStaleTeamRevision, type ReachableRevision } from '../utils/team-revision.js';
 import { formatScorerDiagnostic, parseScorer, type ScorerDefinition, type ScorerDiagnostic } from './definition.js';
+import type { PinnedScorer } from './pin.js';
 
 export type SyncScorerOptions = { scopeLabel?: string } & (
   | { dryRun?: boolean; everyNamespace?: undefined }
@@ -71,6 +72,17 @@ export async function loadCachedScorer(config: LocalConfig, name: string): Promi
   if (!entry || !parsed?.ok || parsed.definition.name !== name) return null;
   const { content: _content, ...rest } = entry;
   return { ...rest, definition: parsed.definition };
+}
+
+/** The scorers among `names` that have a valid cached version, pinned as they are cached now. A name without one is left out (D19). */
+export async function pinScorers(config: LocalConfig, names: Iterable<string>): Promise<Record<string, PinnedScorer>> {
+  const pins: Record<string, PinnedScorer> = {};
+  for (const name of new Set(names)) {
+    const entry = await readCache(config, name);
+    if (!entry || !(await loadCachedScorer(config, name))) continue;
+    pins[name] = { sourceHash: entry.sourceHash, ...(entry.teamRevision ? { teamRevision: entry.teamRevision } : {}), content: entry.content };
+  }
+  return pins;
 }
 
 /** What a directory of `scorers/` holds, or nothing when it is missing, a symlink, or cannot be listed. */

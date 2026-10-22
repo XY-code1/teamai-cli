@@ -1,5 +1,6 @@
 /** Workflow types for the v1alpha1 local-driver subset. */
 
+import type { PinnedScorer } from '../scorers/pin.js';
 import type { ArchivedPass, SessionContinuation, StepState } from './step-state.js';
 import type { LeaseSession } from './workspace.js';
 
@@ -225,6 +226,8 @@ export interface RunState {
   definition: WorkflowDefinition;
   /** The sub-workflows the run uses, by name, as they were cached when it started. */
   workflows?: Record<string, WorkflowDefinition>;
+  /** The scorers its steps list, by name, as they were cached when it started. A name with no valid scorer then is absent. */
+  scorers?: Record<string, PinnedScorer>;
   /**
    * Step instances in declaration order; a sub-workflow's steps follow the step that runs it. Never changed in place:
    * adding or removing an instance assigns a new array, so an index the engine keeps per array never goes stale.

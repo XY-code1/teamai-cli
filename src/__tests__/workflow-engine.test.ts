@@ -2676,7 +2676,7 @@ ${build}  - id: stop
       const stored = await readRun(config, runId);
       if (typeof stored !== 'object') throw new Error(`run ${stored}`);
       const names = new Map([review, guard, fix, after].map((lease) => [lease.attempt, lease.step]));
-      return JSON.parse(JSON.stringify(stored.steps).replace(/a[0-9a-f]{8}/g, (attempt) => names.get(attempt) ?? attempt));
+      return JSON.parse(JSON.stringify(stored.steps).replace(/"installId":"[^"]+"/g, '"installId":"<install>"').replace(/a[0-9a-f]{8}/g, (attempt) => names.get(attempt) ?? attempt));
     };
     expect(await run(false)).toEqual(await run(true));
   });
@@ -2855,7 +2855,7 @@ ${action}  - id: failed
       expect(next).toMatchObject({ data: { done } });
       const stored = await readRun(config, runId);
       if (typeof stored !== 'object') throw new Error(`run ${stored}`);
-      const normalize = (value: unknown) => JSON.parse(JSON.stringify(value).replaceAll(runId, '<run>').replace(/a[0-9a-f]{8}/g, (attempt) =>
+      const normalize = (value: unknown) => JSON.parse(JSON.stringify(value).replaceAll(runId, '<run>').replace(/"installId":"[^"]+"/g, '"installId":"<install>"').replace(/a[0-9a-f]{8}/g, (attempt) =>
         [...held.values()].find((lease) => lease.attempt === attempt)?.step ?? attempt));
       if ('error' in next) throw new Error(next.error.message);
       return { done: normalize(next.data.done), steps: normalize(stored.steps) };
@@ -3801,9 +3801,9 @@ describe('for_each', () => {
     expect(leased).toEqual(['plan#1', 'ship#1']);
     expect(done).toEqual({ run: runId, record: 'pending', outcome: 'succeeded' });
     expect((await readRun(config, runId) as RunState).steps).toEqual([
-      { id: 'plan', status: 'succeeded', outcome: 'success', attempt: expect.any(String), outputs: { targets: [] }, settledAt: 2 },
+      { id: 'plan', status: 'succeeded', outcome: 'success', attempt: expect.any(String), installId: expect.any(String), outputs: { targets: [] }, settledAt: 2 },
       { id: 'build', status: 'succeeded', outcome: 'success', results: [], settledAt: 2 },
-      { id: 'ship', status: 'succeeded', outcome: 'success', attempt: expect.any(String), settledAt: 3 },
+      { id: 'ship', status: 'succeeded', outcome: 'success', attempt: expect.any(String), installId: expect.any(String), settledAt: 3 },
     ]);
   });
 

@@ -33,13 +33,19 @@ const Name = z.string().regex(NAME);
 const Label = z.string().regex(LABEL);
 const Applied = z.enum(['main', 'prompt', 'subagent']);
 
+/** The model asked for, the one the tool reports and the alias asked for, each kept only when shaped like a name. */
+export const ObservedModelSchema = z.object({ requested: Name.optional(), reported: Name.optional(), alias: Name.optional() });
+export type ObservedModel = z.infer<typeof ObservedModelSchema>;
+export const ObservedEffortSchema = z.object({ requested: Label.optional(), reported: Label.optional() });
+export type ObservedEffort = z.infer<typeof ObservedEffortSchema>;
+
 /** What one pass of a step ran as. Every field is best effort: absent when not observed, never inferred. */
 export const AgentObservationSchema = z.object({
   v: z.literal(1),
   definition: z.object({ name: z.string().min(1), applied: Applied.optional() }).optional(),
   tool: z.object({ name: Label, version: Label.optional() }),
-  model: z.object({ requested: Name.optional(), reported: Name.optional(), alias: Name.optional() }).optional(),
-  effort: z.object({ requested: Label.optional(), reported: Label.optional() }).optional(),
+  model: ObservedModelSchema.optional(),
+  effort: ObservedEffortSchema.optional(),
   team: z.object({ revision: z.string().regex(COMMIT), localChanges: z.boolean() }).optional(),
   project: z.object({ commit: z.string().regex(COMMIT), dirty: z.boolean() }).optional(),
   teamai: z.string(),
@@ -130,6 +136,16 @@ export async function observeLaunch(launch: ToolLaunch): Promise<ReportedAgent> 
     ...(team ? { team } : {}),
     ...(head ? { project: { commit: head.head, dirty: head.dirty } } : {}),
   };
+}
+
+/** `values` without those not shaped like a model name, or undefined when none is left. */
+export function observedModel(values: { requested?: string; reported?: string; alias?: string }): ObservedModel | undefined {
+  return names(values);
+}
+
+/** `values` without those not shaped like an effort, or undefined when none is left. */
+export function observedEffort(values: { requested?: string; reported?: string }): ObservedEffort | undefined {
+  return names(values, LABEL);
 }
 
 function names<T extends Record<string, string | undefined>>(values: T, shape = NAME): Partial<T> | undefined {

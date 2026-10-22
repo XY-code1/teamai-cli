@@ -202,22 +202,42 @@ describe('#1083 workflow run records', () => {
   });
 
   it('publishes the failure code of every step failure teamai writes, and only codes it can name', () => {
-    // Codes a `code: '…'` literal in src/workflow or src/scorers writes that never become a run's failure.
+    // Codes src/workflow, src/scorers or teamai score writes, as `code: '…'`, `error('…', …)` or `failure('…', …)`, that never become a run's failure.
     const diagnostics = ['unknown_key', 'missing_needs', 'false_if', 'bad_template', 'dotted_name', 'undeclared_output', 'undeclared_end', 'bad_loop', 'bad_workspace'] satisfies Array<WorkflowDiagnostic['code']>;
     const answers = ['invalid_json', 'driver_running', 'invalid_run', 'repeated_response', 'agent_in_path', 'stale_response', 'retried', 'end_reached', 'repeated_report', 'wrong_attempt', 'invalid_report', 'lease_cancelled', 'interrupted', 'run_unreadable', 'driver_stuck', 'busy', 'workflow_recursion', 'workflow_not_found',
       // Refusals of a run handover, answered to the command or driver that asked for it.
       'not_owner', 'unsupported_repo', 'reports_unreachable', 'reports_failed', 'run_not_found', 'run_not_published', 'run_mismatch',
       'state_conflict', 'state_moved', 'definition_mismatch', 'records_pending', 'snapshot_unsupported', 'secret_detected', 'local_path_detected', 'origin_unavailable', 'commit_missing',
-      'branch_diverged', 'sessions_not_archived'];
-    const sources = ['workflow', 'scorers'].map((dir) => path.join(path.dirname(fileURLToPath(import.meta.url)), '..', dir));
-    const written = new Set(sources.flatMap((source) => fs.readdirSync(source, { recursive: true, encoding: 'utf8' })
-      .filter((file) => file.endsWith('.ts'))
-      .flatMap((file) => [...fs.readFileSync(path.join(source, file), 'utf8').matchAll(/code: '([^']+)'/g)].flatMap((match) => match[1] ?? []))));
+      'branch_diverged', 'sessions_not_archived', 'judge_lease',
+      // Refusals of a driver's or member's request about a run that is already past it.
+      'stale_revision', 'wrong_driver', 'run_settled', 'step_not_found', 'not_hitl', 'not_waiting', 'invalid_choice', 'not_cancellable', 'not_retryable',
+      // Refusals of a judge submit, answered to the driver; the lease and the run stay as they were.
+      'lease_unknown', 'lease_settled', 'entry_closed', 'label_invalid',
+      // Refusals of a teamai score command line before it reads any judge work.
+      'invalid_arguments', 'not_initialized',
+      // teamai score --lease without --submit, until this teamai can run a judge itself.
+      'local_judge_unavailable',
+      // Why a judge attempt closed: kept with the attempt under scores/, never on a run.
+      'judge_failed', 'lease_expired'];
+    const src = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+    const files = [
+      ...['workflow', 'scorers'].flatMap((dir) => fs.readdirSync(path.join(src, dir), { recursive: true, encoding: 'utf8' })
+        .filter((file) => file.endsWith('.ts')).map((file) => path.join(dir, file))),
+      'score-commands.ts',
+    ].map((file) => ({ file, text: fs.readFileSync(path.join(src, file), 'utf8') }));
+    const written = new Set(files.flatMap(({ text }) => [
+      ...[...text.matchAll(/\bcode: ('[^']+'(?:\s*\|\s*'[^']+')*)/g)].flatMap((match) => [...(match[1] ?? '').matchAll(/'([^']+)'/g)].flatMap((code) => code[1] ?? [])),
+      ...[...text.matchAll(/(?<!function )\b(?:error|failure)\('([^']+)'/g)].flatMap((match) => match[1] ?? []),
+    ]));
+    // An `error(…)` whose code is not a literal passes on a code written as a literal elsewhere; each one is named here.
+    const passedOn = ['workflow/engine.ts: tree.failed.code'];
+    const unnamed = files.flatMap(({ file, text }) => [...text.matchAll(/(?<!function )\b(?:error|failure)\((?!')([^,)]+)/g)].map((match) => `${file}: ${match[1]}`));
     const failedWith = (code: string): RunState => runState({
       status: 'failed',
       steps: [{ id: 'one', status: 'failed', outcome: 'failed', attempt: 'a1', settledAt: 2, failure: { code, message: 'm' } }],
     });
 
+    expect(unnamed).toEqual(passedOn);
     expect([...diagnostics, ...answers].filter((code) => !written.has(code))).toEqual([]);
     expect([...written].filter((code) => ![...diagnostics, ...answers].includes(code) && buildEndRecord(failedWith(code), driver, 'tester').failure?.code !== code)).toEqual([]);
   });

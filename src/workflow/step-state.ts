@@ -56,6 +56,8 @@ const report = {
    * version's, reads as absent rather than making the run unreadable.
    */
   agent: AgentObservationSchema.optional().catch(undefined),
+  /** The install whose `report` settled the attempt, so scoring knows which machine holds its session after a claim. */
+  installId: z.string().optional(),
 };
 
 export const OutcomeSchema = z.enum(['success', 'failed', 'skipped', 'cancelled']);
@@ -98,7 +100,11 @@ export const StepPassSchema = z.object({
 export type StepPass = z.infer<typeof StepPassSchema>;
 
 /** A pass of a child or item instance that a loop removed from the run; `step` is its full path. */
-export const ArchivedPassSchema = StepPassSchema.extend({ step: z.string() });
+export const ArchivedPassSchema = StepPassSchema.extend({
+  step: z.string(),
+  /** The step whose new pass archived this one, and that step's pass when it did. */
+  within: z.object({ step: z.string(), pass: z.number().int() }).optional(),
+});
 export type ArchivedPass = z.infer<typeof ArchivedPassSchema>;
 
 /**

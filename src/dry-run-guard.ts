@@ -127,6 +127,7 @@ export const NO_DRY_RUN_PREVIEW: Readonly<Record<string, string>> = {
   'todowrite-hint': 'hook-only',
   'mr-hint': 'hook-only',
   'workflow start': 'creates a run and, with --driver local, runs its commands',
+  score: 'leases judge work and writes labels',
   'workflow next': 'leases a step and writes the run',
   'workflow report': 'writes the reported step outcome',
   'workflow respond': 'writes a HITL request answer',
