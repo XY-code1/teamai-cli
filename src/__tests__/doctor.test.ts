@@ -732,6 +732,24 @@ describe('buildChecks', () => {
         expect(check?.reportedByPull).toBe('pending-learnings');
     });
 
+    it('reports score labels that are kept but not published, next to learnings', async () => {
+        mockedLoadLocalConfig.mockResolvedValue(mockLocalConfig);
+        mockedLoadTeamConfig.mockResolvedValue(mockTeamConfig);
+
+        const ctx = await resolveDoctorContext();
+        if (!ctx) throw new Error('expected a resolved doctor context');
+
+        const names = (await buildChecks(ctx)).map((c) => c.name);
+        expect(names.slice(names.indexOf('Contributed learnings are published'), names.indexOf('Contributed learnings are published') + 2))
+            .toEqual(['Contributed learnings are published', 'Score labels are published']);
+        const check = (await buildChecks(ctx)).find((c) => c.name === 'Score labels are published');
+        expect(check?.fix).toContain('teamai score --push');
+        const { LabelStore } = await import('../scorers/label-store.js');
+        vi.spyOn(LabelStore, 'unpublished').mockResolvedValueOnce(2).mockResolvedValueOnce(0);
+        expect(await check?.check()).toBe(false);
+        expect(await check?.check()).toBe(true);
+    });
+
     it('flags only the queue check as one the pull reports itself', async () => {
         mockedLoadLocalConfig.mockResolvedValue(mockLocalConfig);
         mockedLoadTeamConfig.mockResolvedValue(mockTeamConfig);

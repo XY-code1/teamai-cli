@@ -59,12 +59,14 @@ export function judgedTranscript(found: { session: Session; subagents?: Subagent
   return { body, gaps };
 }
 
-/** What `teamai score --session <id> [--source <platform>] --scorer <name>… [--batch]` asks for. */
+/** What `teamai score --session <id> [--source <platform>] --scorer <name>… [--batch] [--push]` asks for. */
 export interface SessionDemand {
   session?: string;
   source?: string;
   scorers: readonly [string, ...string[]];
   batch?: boolean;
+  /** Publish the scope's pending labels after scoring, as `teamai score --push` does. */
+  push?: boolean;
 }
 
 interface Asked {
@@ -226,5 +228,8 @@ export async function scoreSession(from: LocalConfig, demand: SessionDemand, now
     }
   }
   const [only, ...more] = answers;
-  return { data: only && more.length === 0 ? { label: only } : { labels: answers } };
+  const scored = only && more.length === 0 ? { label: only } : { labels: answers };
+  if (!demand.push) return { data: scored };
+  const pushed = await LabelStore.push(config);
+  return 'data' in pushed ? { data: { ...scored, ...pushed.data } } : pushed;
 }

@@ -2,7 +2,17 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const during = vi.hoisted(() => ({ push: async (): Promise<void> => {} }));
+vi.mock('../utils/reports-branch.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/reports-branch.js')>();
+  return { ...actual, updateReports: async (...args: Parameters<typeof actual.updateReports>) => {
+    await during.push();
+    return actual.updateReports(...args);
+  } };
+});
+
 import { labelId, parseScoreLabels, type ScoreLabel } from '../scorers/label.js';
 import { LabelStore } from '../scorers/label-store.js';
 import type { LocalConfig } from '../types.js';
@@ -18,6 +28,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  during.push = async () => {};
   process.env.HOME = home;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -99,6 +110,42 @@ describe('LabelStore', () => {
     await LabelStore.append(config, modelLabel('2026-10-22T11:00:00.000Z'), 'kept');
     expect(await LabelStore.publish(config)).toEqual({ state: 'pending', reason: 'Usage reporting is off, so labels stay on this machine.' });
     expect(fs.readdirSync(path.join(config.dataHome ?? '', 'scores', 'pending'))).toHaveLength(1);
+  });
+
+  it('keeps labels here and says why when the team repo is http, which has no teamai-reports branch', async () => {
+    const config = clone(origin(), 'http');
+    const http: LocalConfig = { ...config, repo: { ...config.repo, kind: 'http' } };
+    await LabelStore.append(http, modelLabel('2026-10-22T11:00:00.000Z'), 'kept');
+
+    expect(await LabelStore.publish(http)).toEqual({
+      state: 'unsupported',
+      reason: 'Publishing score labels needs a team repo with a teamai-reports branch; an http team repo has none, so labels stay on this machine.',
+    });
+    expect(fs.readdirSync(path.join(http.dataHome ?? '', 'scores', 'pending'))).toHaveLength(1);
+  });
+
+  it('counts the labels a push would publish: pending ones, and none while usage reporting is off', async () => {
+    const config = clone(origin(), 'count');
+    await LabelStore.append(config, modelLabel('2026-10-22T11:00:00.000Z'), 'kept');
+
+    expect(await LabelStore.unpublished(config)).toBe(1);
+    expect(await LabelStore.unpublished({ ...config, usageReportEnabled: false })).toBe(0);
+    await LabelStore.publish(config);
+    expect(await LabelStore.unpublished(config)).toBe(0);
+  });
+
+  it('keeps a label scored again during a push pending, and publishes it with the next push', async () => {
+    const remote = origin();
+    const config = clone(remote, 'rescored');
+    const rescore = modelLabel('2026-10-22T12:00:00.000Z', 'bad');
+    await LabelStore.append(config, modelLabel('2026-10-22T11:00:00.000Z'), 'first');
+    during.push = async () => { await LabelStore.append(config, rescore, 'second'); };
+
+    expect(await LabelStore.publish(config)).toEqual({ state: 'pending', reason: 'a label was scored again while the others were published' });
+    expect(fs.readdirSync(path.join(config.dataHome ?? '', 'scores', 'pending'))).toEqual([`${labelId(rescore)}.json`]);
+    during.push = async () => {};
+    expect(await LabelStore.publish(config)).toEqual({ state: 'published' });
+    expect(parseScoreLabels(git(remote, 'show', 'teamai-reports:scores/alice/2026-10.jsonl'))).toEqual([rescore]);
   });
 
   it('keeps a label only once its outbox entry is written, so a failed write never strands it unpublished', async () => {

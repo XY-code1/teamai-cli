@@ -259,6 +259,7 @@ Generated: do not edit by hand. Regenerate with
   - `--scorer <name>` — With --run: a scorer the run pinned or one teamai pull cached. With --session, or alone inside a session: a scorer teamai pull cached. Repeatable.
   - `--queue` — With --run: leave the work to any driver's score --next instead of judging it here
   - `--batch` — With --run or --session: the scorers share one judge call when they resolve to the same tool and model
+  - `--push` — Publish every pending label of this machine to scores/<member>/<YYYY-MM>.jsonl on teamai-reports, alone or after --session. Labels only: never the session, the prompt or the judge's reasoning. With usage reporting off, or when the push fails, they stay pending for the next --push.
 
 ## hooks
 

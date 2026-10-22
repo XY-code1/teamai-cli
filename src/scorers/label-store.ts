@@ -7,8 +7,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { loadTeamConfig } from '../config.js';
-import { getReportsDir, isUsageReportEnabled, type LocalConfig } from '../types.js';
+import { getReportsDir, isUsageReportEnabled, usesBranchWorktree, type LocalConfig } from '../types.js';
 import { readFileSafe, writeFileAtomic, writeJsonAtomic } from '../utils/fs.js';
+import { log } from '../utils/logger.js';
 import { AttemptStore, scoresDir } from './attempts.js';
 import { labelId, labelVersion, newestLabels, parseScoreLabel, parseScoreLabels, type JudgeUsage, type ScoreLabel } from './label.js';
 
@@ -73,7 +74,8 @@ async function publishedLabels(config: LocalConfig): Promise<ScoreLabel[]> {
 }
 
 /** Whether a publish delivered every pending label, and when not, why they stay on this machine. */
-export type LabelDelivery = { state: 'published' } | { state: 'pending'; reason: string };
+/** Where `publish` left the labels. `unsupported`: the team repo has no teamai-reports branch, so they stay pending here. */
+export type LabelDelivery = { state: 'published' } | { state: 'pending' | 'unsupported'; reason: string };
 
 /** What Workflow Runs shows of a label: never its reasoning, judge, or usage. */
 export type PassScore = Pick<ScoreLabel, 'scorer' | 'label' | 'passed'>;
@@ -111,6 +113,9 @@ export const LabelStore = {
    * `labels.jsonl` is appended there first. Nothing is published with usage reporting off.
    */
   async publish(config: LocalConfig): Promise<LabelDelivery> {
+    if (!usesBranchWorktree(config)) {
+      return { state: 'unsupported', reason: 'Publishing score labels needs a team repo with a teamai-reports branch; an http team repo has none, so labels stay on this machine.' };
+    }
     const pending = await readPending(config);
     if (pending.length === 0) return { state: 'published' };
     if (!isUsageReportEnabled(config, (await loadTeamConfig(config.repo.localPath)) ?? {})) {
@@ -155,6 +160,25 @@ export const LabelStore = {
         return unhandled;
       }
     }
+  },
+
+  /** How many labels a push would publish: the pending ones, or none while usage reporting is off. */
+  async unpublished(config: LocalConfig): Promise<number> {
+    if (!isUsageReportEnabled(config, (await loadTeamConfig(config.repo.localPath)) ?? {})) return 0;
+    return (await readPending(config)).length;
+  },
+
+  /** `publish`, telling the member where the labels are: `teamai score --push`'s answer. */
+  async push(config: LocalConfig): Promise<{ data: { published: boolean } } | { error: { code: string; message: string } }> {
+    const delivery = await LabelStore.publish(config);
+    if (delivery.state === 'unsupported') return { error: { code: 'unsupported_repo', message: delivery.reason } };
+    if (delivery.state === 'published') {
+      log.info('Every score label of this machine is on teamai-reports.');
+      return { data: { published: true } };
+    }
+    log.warn(delivery.reason);
+    log.info('The labels stay pending until teamai score --push can publish them.');
+    return { data: { published: false } };
   },
 
   /**

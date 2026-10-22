@@ -507,6 +507,15 @@ describe('teamai score --session', () => {
     expect(fs.existsSync(path.join(root, 'elsewhere-data', 'scores'))).toBe(false);
   });
 
+  it('publishes from the scope the session ran in with push, also when it is scored from another one', async () => {
+    const { userHome, elsewhere } = await scopedElsewhere('http');
+
+    expect(await scoreSession(elsewhere, { session: SESSION, source: 'claude-code', scorers: ['quality'], push: true })).toEqual({
+      error: { code: 'unsupported_repo', message: 'Publishing score labels needs a team repo with a teamai-reports branch; an http team repo has none, so labels stay on this machine.' },
+    });
+    expect(fs.readdirSync(path.join(userHome, 'scores', 'pending'))).toHaveLength(1);
+  });
+
   it('writes the label under the lock a push takes, so a push never drops it', async () => {
     const config = await fixture();
     plantClaudeSession(path.join(root, 'app'), 'Add retries to the client');

@@ -639,6 +639,16 @@ export async function buildChecks(ctx: DoctorContext, stage: CheckStage = 'docto
         + 'can push to the team repo (run with --verbose to see the push error).',
     },
     {
+      // A score label waits on this machine until a push or a pull publishes it.
+      name: 'Score labels are published',
+      source: 'local',
+      check: async () => {
+        const { LabelStore } = await import('./scorers/label-store.js');
+        return await LabelStore.unpublished(localConfig) === 0;
+      },
+      fix: 'Run `teamai score --push` to publish them; it says why when it cannot.',
+    },
+    {
       // A dead process's lock cannot block anything — the next writer of that
       // same lock reclaims it — but a leftover file is exactly the noise #1027
       // reports, and the only way a SIGKILLed run ever gets cleaned up.
