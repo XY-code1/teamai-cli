@@ -81,7 +81,7 @@ async function settledRun(config: LocalConfig): Promise<string> {
   await syncWorkflowDefinitions(config);
   const runId = String(data(await startRun(config, 'review')).run);
   const lease = z.object({ attempt: z.string(), revision: z.number() }).parse(data(await leaseNext(config, runId, workDriver)).lease);
-  data(await reportAttempt(config, runId, { attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver: workDriver }));
+  data(await reportAttempt(config, runId, { attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver: workDriver, outputs: { reviewed: true } }));
   expect(data(await leaseNext(config, runId, workDriver))).toMatchObject({ done: { outcome: 'succeeded' } });
   return runId;
 }
@@ -128,7 +128,7 @@ describe('judge work', () => {
       submit: `teamai score --lease ${lease.ref} --submit --stdin`,
     });
     expect(JSON.parse(fs.readFileSync(path.join(lease.evidence, 'evidence.json'), 'utf8'))).toEqual({
-      subject: { runId, step: 'review', pass: 1 }, gaps: ['evidence_not_built'],
+      subject: { runId, step: 'review', pass: 1 }, kind: 'prompt', ranges: [], gaps: ['no_recorded_range', 'transcript_not_found'],
     });
     expect(fs.readFileSync(lease.prompt, 'utf8')).toContain('Judge the review.');
 
@@ -179,7 +179,7 @@ describe('judge work', () => {
     const runId = await settledRun(config);
     const lease = leaseOf(await nextJudgeLease(config, request()));
     expect(data(await leaseNext(config, runId, workDriver))).toEqual(expect.objectContaining({ done: expect.anything() }));
-    expect(await reportAttempt(config, runId, { attempt: lease.ref, revision: 1, outcome: 'success', driver: workDriver }))
+    expect(await reportAttempt(config, runId, { attempt: lease.ref, revision: 1, outcome: 'success', driver: workDriver, outputs: { reviewed: true } }))
       .toMatchObject({ error: { code: 'judge_lease', message: expect.stringContaining(`teamai score --lease ${lease.ref} --submit`) } });
   });
 
@@ -359,7 +359,8 @@ describe('scoredPasses', () => {
 
     expect(scoredPasses(looped, install)).toEqual([{ subject: { runId, step: 'check', pass: 1 }, scorers: ['quality'] }]);
     expect(scoredPasses(looped, 'elsewhere')).toEqual([]);
-    expect(data(await nextJudgeLease(config, request()))).toMatchObject({ lease: { subject: { runId, step: 'check', pass: 1 } } });
+    // Taken here, then closed: the hand-built pass recorded nothing to judge.
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 } });
   });
 
   it('scores the items of a for_each step, never the step that fans them out', async () => {

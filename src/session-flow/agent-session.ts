@@ -16,7 +16,7 @@ import { resolveMemberToolRoots } from '../config.js';
 import { getTeamaiHomeDir, type LocalConfig } from '../types.js';
 import { acquireLock, releaseLock } from '../update.js';
 import { ADAPTER_REGISTRY, listAvailablePlatforms, listInstalledPlatforms } from './adapters/index.js';
-import { ToolUnavailableError, type AgentAdapter, type SessionMeta } from './adapters/base.js';
+import { ToolUnavailableError, type AgentAdapter, type SessionMeta, type SubagentsRead } from './adapters/base.js';
 import { imagePlaceholderText, type ContentBlock, type Message, type Session } from './ir.js';
 import { deriveTargetSessionId, legacyTargetSessionIds } from './ids.js';
 import { degradeThinkingBlocks, fidelityFromSession, type FidelityReport } from './migrate.js';
@@ -72,15 +72,21 @@ export type AgentSessionFindOptions = {
   scrub?: boolean;
   /** Where the recorded tool roots come from; a run that reads many sessions passes one `toolRootsLookup()`. */
   toolRootsFor?: ToolRootsLookup;
+  /** Also read the agents the session started, into `subagents`; off by default, so the session itself is unchanged. */
+  subagents?: boolean;
 };
+
+export type { Subagent, SubagentsRead } from './adapters/base.js';
 
 export type AgentSessionFound =
   | {
       status: 'done';
       /** The session as stored, its id taken from what was opened, never from the request. */
       session: Session;
-      /** Secret-looking values replaced, when `scrub` was set. */
+      /** Secret-looking values replaced, when `scrub` was set, the subagents' included. */
       redactedCount?: number;
+      /** The agents the session started, when `subagents` was set. */
+      subagents?: SubagentsRead;
     }
   | { status: 'failed'; failure: AgentSessionFailure };
 
@@ -389,15 +395,31 @@ async function list({ platforms, cwd, updatedSince }: AgentSessionListQuery = {}
  */
 async function find(
   ref: AgentSessionRef,
-  { scrub = true, toolRootsFor = recordedToolRoots }: AgentSessionFindOptions = {},
+  { scrub = true, toolRootsFor = recordedToolRoots, subagents = false }: AgentSessionFindOptions = {},
 ): Promise<AgentSessionFound> {
   const source = adapterFor(ref.platform, 'read', await toolRootsFor(ref.cwd));
   if ('code' in source) return { status: 'failed', failure: source };
   const session = await readSource(source, ref);
   if ('code' in session) return { status: 'failed', failure: session };
-  if (!scrub) return { status: 'done', session };
+  const agents = subagents ? { subagents: await readSubagents(source, session, ref) } : {};
+  if (!scrub) return { status: 'done', session, ...agents };
   const scrubbed = scrubSession(session);
-  return { status: 'done', session: scrubbed.session, redactedCount: scrubbed.redactedCount };
+  if (agents.subagents?.status !== 'read') return { status: 'done', session: scrubbed.session, redactedCount: scrubbed.redactedCount, ...agents };
+  const read = agents.subagents.agents.map((agent) => ({ agent, scrubbed: scrubSession(agent.session) }));
+  return {
+    status: 'done',
+    session: scrubbed.session,
+    redactedCount: read.reduce((count, item) => count + item.scrubbed.redactedCount, scrubbed.redactedCount),
+    subagents: { status: 'read', agents: read.map(({ agent, scrubbed: own }) => ({ ...agent, session: own.session })) },
+  };
+}
+
+async function readSubagents(source: AgentAdapter, session: Session, ref: AgentSessionRef): Promise<SubagentsRead> {
+  try {
+    return await source.readSubagents(session, { sessionId: ref.sessionId, projectPath: ref.cwd, filePath: ref.filePath });
+  } catch (e) {
+    return { status: 'unread', reason: messageOf(e) };
+  }
 }
 
 async function copy({ from, to, scrub = false, toolRootsFor = recordedToolRoots }: AgentSessionCopyRequest): Promise<AgentSessionCopy> {

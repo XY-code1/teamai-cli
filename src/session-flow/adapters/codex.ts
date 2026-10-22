@@ -40,7 +40,8 @@ import * as path from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import crossSpawn from 'cross-spawn';
-import { AgentAdapter, type SessionMeta, type SessionReadRef } from './base.js';
+import { z } from 'zod';
+import { AgentAdapter, type SessionMeta, type SessionReadRef, type Subagent, type SubagentsRead } from './base.js';
 import type { Session, Message, ContentBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock } from '../ir.js';
 import { imagePlaceholderText } from '../ir.js';
 import { titleFromUserText, visibleUserText } from '../title.js';
@@ -236,6 +237,18 @@ async function findCodexCli(): Promise<string | null> {
   }
   return null;
 }
+
+const ChildRolloutMetaSchema = z.object({
+  type: z.literal('session_meta'),
+  payload: z.object({
+    id: z.string().min(1),
+    timestamp: z.string().optional(),
+    cwd: z.string().optional(),
+    source: z.object({ subagent: z.object({ thread_spawn: z.object({ parent_thread_id: z.string().min(1) }) }) }),
+    subagent_history_start_ordinal: z.number().int().optional(),
+  }),
+});
+type ChildRollout = { file: string; meta: z.infer<typeof ChildRolloutMetaSchema>['payload'] };
 
 // ---------------------------------------------------------------------------
 // CodexAdapter
@@ -497,6 +510,62 @@ export class CodexAdapter extends AgentAdapter {
       updatedAt,
       messages,
       metadata: sessionMetadata,
+    };
+  }
+
+  /**
+   * The agents a session spawned: rollouts written since it started whose first record names it, or an agent it
+   * spawned, as the parent thread. Each agent reads from `subagent_history_start_ordinal`, so the parent history the
+   * agent was given is not read twice; a rollout without it is read whole, with its start `unknown`. Agents come in
+   * spawn order, each followed by the agents it spawned.
+   */
+  async readSubagents(session: Session, _ref: SessionReadRef): Promise<SubagentsRead> {
+    const since = Date.parse(session.createdAt);
+    const children = new Map<string, ChildRollout[]>();
+    for (const file of this.scanAllRollouts()) {
+      try {
+        if (fs.statSync(file).mtimeMs < since) continue;
+      } catch {
+        continue;
+      }
+      const parsed = ChildRolloutMetaSchema.safeParse(this.readFirstLine(file));
+      if (!parsed.success || Date.parse(parsed.data.payload.timestamp ?? '') < since) continue;
+      const parent = parsed.data.payload.source.subagent.thread_spawn.parent_thread_id;
+      children.set(parent, [...children.get(parent) ?? [], { file, meta: parsed.data.payload }]);
+    }
+    const agents: Subagent[] = [];
+    const visit = (parent: string, depth: number): void => {
+      const spawned = [...children.get(parent) ?? []].sort((left, right) => (left.meta.timestamp ?? '').localeCompare(right.meta.timestamp ?? ''));
+      for (const child of spawned) {
+        if (agents.some((agent) => agent.session.sessionId === child.meta.id)) continue;
+        agents.push({ ...this.readChild(child), depth });
+        visit(child.meta.id, depth + 1);
+      }
+    };
+    visit(session.sessionId, 1);
+    return { status: 'read', agents };
+  }
+
+  private readChild({ file, meta }: ChildRollout): Omit<Subagent, 'depth'> {
+    const start = meta.subagent_history_start_ordinal;
+    const records = [...readJsonl(file)].filter((record) =>
+      start === undefined || (typeof record.ordinal === 'number' && record.ordinal >= start));
+    const messages = this.buildMessages(records);
+    const createdAt = parseCodexTimestamp(meta.timestamp);
+    return {
+      session: {
+        sessionId: meta.id,
+        title: '',
+        cwd: meta.cwd ?? '',
+        platform: this.platform,
+        createdAt,
+        updatedAt: messages.at(-1)?.timestamp ?? createdAt,
+        messages,
+        metadata: {},
+      },
+      finished: records.some((record) => record.type === 'event_msg'
+        && typeof record.payload === 'object' && record.payload !== null && 'type' in record.payload && record.payload.type === 'task_complete'),
+      start: start === undefined ? 'unknown' : 'recorded',
     };
   }
 

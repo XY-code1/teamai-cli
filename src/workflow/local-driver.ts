@@ -41,7 +41,7 @@ import type { DriverIdentity, StepHitl, WorkflowEnvelope, WorkflowFailure } from
 import { isWorkflowError } from './types.js';
 import type { LeaseSession, SessionRef, WorkspaceContract } from './workspace.js';
 import {
-  applyBaseConfig, commitWork, ensureWorktree, fetchMissingCommits, git, headCommit, hooksPath, keptSentence, type KeptChanges, markReadCopy, mergeBranch, offBranch, pushIfOrigin, putBackCopy, reconcileCopy, recordConfigOverlay, removeWorktree, reopenConfigConflicts, restoreUneditedConfig, unrestoredCopy, worktreePath,
+  applyBaseConfig, commitWork, ensureWorktree, fetchMissingCommits, git, headCommit, hooksPath, keptSentence, type KeptChanges, markReadCopy, mergeBranch, offBranch, pushIfOrigin, putBackCopy, reconcileCopy, recordConfigOverlay, removeWorktree, reopenConfigConflicts, restoreUneditedConfig, stepCheckout, unrestoredCopy, worktreePath,
 } from './worktree.js';
 
 /** Local lease identity, stable across restarts in the same workspace. */
@@ -378,9 +378,8 @@ function leaseCommits(workspace: WorkspaceContract): Array<{ commit: string; bra
   return [{ commit: start.commit, branch: startBranch }, ...workspace.merge, { commit: workspace.configCommit, branch: base.ref }];
 }
 
-/** The checkout this lease uses. A step without a workspace shares the active checkout; a workspace has its own worktree. */
 function placeOf(lease: Lease, active: string): string {
-  return lease.cwd ?? (lease.workspace ? worktreePath(active, lease.workspace.branch) : active);
+  return lease.cwd ?? stepCheckout(active, lease.workspace?.branch);
 }
 
 async function stageLease(lease: Lease, { active, runId }: { active: string; runId: string }): Promise<WorkflowFailure | undefined> {

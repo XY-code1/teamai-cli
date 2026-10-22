@@ -1,3 +1,4 @@
+import { JUDGE_FAILURES } from '../scorers/attempts.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -218,7 +219,7 @@ describe('#1083 workflow run records', () => {
       // teamai score --lease without --submit, until this teamai can run a judge itself.
       'local_judge_unavailable',
       // Why a judge attempt closed: kept with the attempt under scores/, never on a run.
-      'judge_failed', 'lease_expired'];
+      ...JUDGE_FAILURES];
     const src = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
     const files = [
       ...['workflow', 'scorers'].flatMap((dir) => fs.readdirSync(path.join(src, dir), { recursive: true, encoding: 'utf8' })
@@ -238,7 +239,7 @@ describe('#1083 workflow run records', () => {
     });
 
     expect(unnamed).toEqual(passedOn);
-    expect([...diagnostics, ...answers].filter((code) => !written.has(code))).toEqual([]);
+    expect([...diagnostics, ...answers].filter((code) => !written.has(code) && !JUDGE_FAILURES.some((failure) => failure === code))).toEqual([]);
     expect([...written].filter((code) => ![...diagnostics, ...answers].includes(code) && buildEndRecord(failedWith(code), driver, 'tester').failure?.code !== code)).toEqual([]);
   });
 

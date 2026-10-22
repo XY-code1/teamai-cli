@@ -71,3 +71,5 @@ JSON
 | `teamai-reports` 上的 `scores/<member>/<YYYY-MM>.jsonl` | 已发布的标签，每个评分器、评分标准、执行轮次和评审类型只保留最新一条。推送成功前标签留在 `<dataHome>/scores/pending/`；关闭用量上报时一直留在那里。 |
 
 工作流运行页面显示每一轮的标签，以及评审开销，与运行本身的 token 分开统计。本机的运行统计每一次评审尝试；成员发布的运行只统计产生了标签的评审。
+
+`score --next` 准备 `evidence.json`、`prompt.md`、有记录范围时的 `diff.patch`、`repo/`、`transcripts/` 和 `outputs.json`。仓库包含被评判提交中的跟踪文件，符号链接的目标以文本保存。会话记录包含可读取的子代理并经过脱敏。缺失证据以 gap 代码列出。租约结算或过期后删除证据。

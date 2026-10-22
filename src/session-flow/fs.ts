@@ -10,6 +10,8 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { StringDecoder } from 'node:string_decoder';
+import { z } from 'zod';
 import {
   CLAUDE_TOOL_ID,
   CODEX_TOOL_ID,
@@ -181,31 +183,53 @@ export function decodeCwdGeneric(encoded: string): string {
 // Streaming JSONL read/write
 // ---------------------------------------------------------------------------
 
-/**
- * Stream-read a JSONL file, yielding one parsed object per line.
- * Blank lines are skipped; a line that fails to parse throws SyntaxError.
- */
+const JsonlRecord = z.record(z.unknown());
+
 export function* readJsonl(filePath: string): Generator<Record<string, unknown>> {
-  const content = fs.readFileSync(filePath, 'utf-8');
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    yield JSON.parse(trimmed) as Record<string, unknown>;
+  let pending: string | undefined;
+  let count = 0;
+  for (const line of jsonlLines(filePath)) {
+    if (!line.trim()) continue;
+    if (pending !== undefined) {
+      yield JsonlRecord.parse(JSON.parse(pending));
+      count++;
+    }
+    pending = line;
+  }
+  if (pending === undefined) return;
+  let value: unknown;
+  try {
+    value = JSON.parse(pending);
+  } catch (error) {
+    if (count === 0) throw error;
+    return;
+  }
+  yield JsonlRecord.parse(value);
+}
+
+export function* readJsonlHead(filePath: string, maxLines: number): Generator<Record<string, unknown>> {
+  if (maxLines <= 0) return;
+  let count = 0;
+  for (const record of readJsonl(filePath)) {
+    yield record;
+    if (++count >= maxLines) return;
   }
 }
 
-/**
- * Read the first N lines of a JSONL file (for extracting metadata without loading a large file).
- */
-export function* readJsonlHead(filePath: string, maxLines: number): Generator<Record<string, unknown>> {
-  const content = fs.readFileSync(filePath, 'utf-8');
-  let count = 0;
-  for (const line of content.split('\n')) {
-    if (count >= maxLines) break;
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    count++;
-    yield JSON.parse(trimmed) as Record<string, unknown>;
+function* jsonlLines(filePath: string): Generator<string> {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const decoder = new StringDecoder('utf8');
+    const chunk = Buffer.alloc(64 * 1024);
+    let partial = '';
+    for (let read = fs.readSync(fd, chunk); read > 0; read = fs.readSync(fd, chunk)) {
+      const parts = (partial + decoder.write(chunk.subarray(0, read))).split('\n');
+      partial = parts.pop() ?? '';
+      yield* parts;
+    }
+    yield partial + decoder.end();
+  } finally {
+    fs.closeSync(fd);
   }
 }
 

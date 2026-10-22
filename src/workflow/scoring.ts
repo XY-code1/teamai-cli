@@ -8,7 +8,6 @@ import path from 'node:path';
 import { z } from 'zod';
 import { DriverSchema } from '../driver-identity.js';
 import type { LocalConfig } from '../types.js';
-import { writeFileAtomic, writeJsonAtomic } from '../utils/fs.js';
 import { log } from '../utils/logger.js';
 import {
   AttemptStore, newAttemptId, scoresDir, type AttemptRecord, type JudgeDriver, type LeasedAttempt, type SucceededAttempt,
@@ -23,6 +22,8 @@ import { LabelStore, reasoningPath } from '../scorers/label-store.js';
 import { isSampled } from '../scorers/sampling.js';
 import { scoringUnavailable } from '../scorers/home.js';
 import { observedModel, type ObservedModel } from '../agent-observation.js';
+import { answerSchema, evidenceDirOf, sweepEvidence } from '../scorers/evidence.js';
+import { buildEvidence } from './scoring-evidence.js';
 import { error, ok } from './engine.js';
 import { firstSettled, passesWithin, runPasses, type RunPass } from './loop.js';
 import { stepDefinitions } from './scope.js';
@@ -178,41 +179,12 @@ function stillJudges(request: JudgeRequest, attempt: LeasedAttempt): boolean {
 }
 
 function evidenceDir(config: LocalConfig, attempt: string): string {
-  return path.join(scoresDir(config), 'evidence', attempt);
-}
-
-function answerSchema(definition: ScorerDefinition): Record<string, unknown> {
-  return {
-    type: 'object',
-    required: ['label', 'reasoning'],
-    additionalProperties: false,
-    properties: { label: { enum: definition.labels.map((label) => label.value) }, reasoning: { type: 'string' } },
-  };
-}
-
-function promptText(definition: ScorerDefinition): string {
-  return [
-    definition.prompt.trim(),
-    '',
-    'Answer with one of these labels:',
-    ...definition.labels.map((label) => `- ${label.value}: ${label.description}`),
-    '',
-    'Reply with JSON: {"label": "<one label>", "reasoning": "<why>"}',
-    '',
-  ].join('\n');
-}
-
-/** The evidence directory for `attempt`. Until evidence is built, it holds the subject, the prompt and a gap that says so. */
-async function writeEvidence(config: LocalConfig, attempt: LeasedAttempt, definition: ScorerDefinition): Promise<{ dir: string; prompt: string }> {
-  const dir = evidenceDir(config, attempt.attempt);
-  const prompt = path.join(dir, 'prompt.md');
-  await writeJsonAtomic(path.join(dir, 'evidence.json'), { subject: attempt.subject, gaps: ['evidence_not_built'] });
-  await writeFileAtomic(prompt, promptText(definition));
-  return { dir, prompt };
+  return evidenceDirOf(scoresDir(config), attempt);
 }
 
 async function leaseAnswer(config: LocalConfig, entry: ScoreEntry, attempt: LeasedAttempt, handedBack: boolean) {
-  const { dir, prompt } = await writeEvidence(config, attempt, entry.definition);
+  const dir = evidenceDir(config, attempt.attempt);
+  const prompt = path.join(dir, 'prompt.md');
   const ref = leaseRefOf(attempt);
   return {
     ref,
@@ -301,7 +273,22 @@ export async function takeJudgeLease(config: LocalConfig, request: JudgeRequest,
   });
   if (outcome.status === 'busy') return { kind: 'busy' };
   const leased = outcome.value;
-  if (leased) return { kind: 'lease', lease: await leaseAnswer(config, leased.entry, leased.attempt, leased.handedBack) };
+  const attempts = await AttemptStore.read(config);
+  await sweepEvidence(scoresDir(config), new Set([...attempts.values()].flat()
+    .filter((attempt) => attempt.status !== 'leased' || hasLapsed(attempt, now)).map((attempt) => attempt.attempt)));
+  if (leased) {
+    const built = await buildEvidence(leased.entry.run, leased.entry.subject, leased.entry.definition, evidenceDir(config, leased.attempt.attempt));
+    if (!built.ok) {
+      const closed = await AttemptStore.locked(config, async () => {
+        const current = await AttemptStore.get(config, leased.attempt.entry, leased.attempt.attempt);
+        if (current?.status === 'leased') await AttemptStore.write(config, { ...current, status: 'failed', code: built.code, settledAt: now });
+      });
+      if (closed.status === 'busy') return { kind: 'busy' };
+      await fs.rm(evidenceDir(config, leased.attempt.attempt), { recursive: true, force: true, maxRetries: 3 });
+      return takeJudgeLease(config, request, now);
+    }
+    return { kind: 'lease', lease: await leaseAnswer(config, leased.entry, leased.attempt, leased.handedBack) };
+  }
   return {
     kind: 'idle',
     open: found.filter(isOpen).length,
@@ -417,11 +404,12 @@ export async function submitJudgeLease(config: LocalConfig, ref: string, submiss
       ...attempt, ...settled, status: 'succeeded', labelId: id, verdict: { label: label.label, score: label.score, passed: label.passed, version },
     };
     await AttemptStore.write(config, succeeded);
-    await fs.rm(evidenceDir(config, attempt.attempt), { recursive: true, force: true, maxRetries: 3 });
     return ok(labelAnswer(config, succeeded));
   });
   if (outcome.status === 'busy') return error('busy', 'The judge attempts are locked by another process. Submit again.');
-  if ('error' in outcome.value || !('label' in outcome.value.data)) return outcome.value;
+  if ('error' in outcome.value) return outcome.value;
+  await fs.rm(evidenceDir(config, parsedRef.attempt), { recursive: true, force: true, maxRetries: 3 });
+  if (!('label' in outcome.value.data)) return outcome.value;
   // Publishing is best effort: a label that does not reach teamai-reports now stays pending for the next pull.
   const delivery = await LabelStore.publish(config).catch((e: unknown) => ({ state: 'pending' as const, reason: e instanceof Error ? e.message : String(e) }));
   if (delivery.state === 'pending') log.debug(`[scores] Labels stay pending: ${delivery.reason}`);

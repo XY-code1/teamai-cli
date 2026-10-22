@@ -16,7 +16,7 @@ const ENTRY_ID = /^s[0-9a-f]{13}$/;
 const ATTEMPT_ID = /^a[0-9a-f]{8}$/;
 
 /** Why a judge attempt closed without a label. */
-export const JUDGE_FAILURES = ['judge_failed', 'lease_expired'] as const;
+export const JUDGE_FAILURES = ['judge_failed', 'lease_expired', 'evidence_empty'] as const;
 export type JudgeFailureCode = (typeof JUDGE_FAILURES)[number];
 
 export type JudgeDriver = z.infer<typeof DriverSchema>;

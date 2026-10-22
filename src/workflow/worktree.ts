@@ -77,6 +77,10 @@ export function worktreePath(main: string, branch: string): string {
   return path.join(main, '.teamai', 'workflow-worktrees', `${safe}-${hash}`);
 }
 
+export function stepCheckout(active: string, branch: string | undefined): string {
+  return branch === undefined ? active : worktreePath(active, branch);
+}
+
 /** The checkout `dir` is in a step worktree of (see worktreePath), whether or not that worktree still exists. */
 export function worktreeCheckout(dir: string): string | undefined {
   const parts = path.resolve(dir).split(path.sep);

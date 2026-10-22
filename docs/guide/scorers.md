@@ -71,3 +71,5 @@ Where labels go:
 | `scores/<member>/<YYYY-MM>.jsonl` on `teamai-reports` | Published labels, the newest per scorer, rubric, pass and judge kind. Labels wait in `<dataHome>/scores/pending/` until a push lands, and stay there while usage reporting is off. |
 
 Workflow Runs shows each pass's labels, and what judging cost apart from the run's own tokens. For a run on this machine that counts every judge attempt; for a run a member published, only the labelled ones.
+
+`score --next` prepares `evidence.json`, `prompt.md`, `diff.patch` when a range was recorded, `repo/`, `transcripts/`, and `outputs.json`. The repository contains tracked files at the judged commit, with symlink targets stored as text. Transcripts include readable subagents and are redacted. Missing evidence is listed as gap codes. Evidence is removed when the lease settles or lapses.
