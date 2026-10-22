@@ -76,6 +76,15 @@ JSON
 
 `can.judge.access` says what your judge can do: `answer` (no tools), `read` (reads the evidence) or `full` (any tool, the default). Its labels record it. A label the scorer does not list is refused, and the lease stays open. `workflow next` never hands out judge work. `teamai score --help` has every field.
 
+With `scorers: { names: [review-quality, test-coverage], batch: true }`, the scorers of one pass that resolve to the same tool and model share one lease, one evidence directory and one prompt. The lease lists `scorers` and `batched: true`, and the answer has one label per scorer:
+
+```json
+{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
+ "answer":{"review-quality":{"label":"good","reasoning":"…"},"test-coverage":{"label":"thin","reasoning":"…"}}}
+```
+
+Each label records `judge.batched: true`. One label a scorer does not list refuses the whole answer, and the lease stays open.
+
 Where labels go:
 
 | Path | What |

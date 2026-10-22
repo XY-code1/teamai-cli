@@ -34,26 +34,46 @@ export function keepEnds(text: string, max: number): string {
   return `${text.slice(0, half)}${note}${text.slice(text.length - (available - half))}`;
 }
 
-/** The scorer's own prompt and the labels it allows: what the judge is asked, before any evidence. */
-export function rubricPrompt(definition: ScorerDefinition): string {
+/** The scorers one judge call applies: one, or the scorers of a batch in the step's order. */
+export type Rubrics = readonly [ScorerDefinition, ...ScorerDefinition[]];
+
+function labelLines(definition: ScorerDefinition): string[] {
+  return definition.labels.map((label) => `- ${label.value}: ${label.description}`);
+}
+
+/** What the judge is asked, before any evidence: each scorer's own prompt and the labels it allows, then the reply shape. */
+export function rubricPrompt(rubrics: Rubrics): string {
+  const [only, ...others] = rubrics;
+  if (others.length === 0) {
+    return [only.prompt.trim(), '', 'Answer with one of these labels:', ...labelLines(only), '', 'Reply with JSON: {"label": "<one label>", "reasoning": "<why>"}', ''].join('\n');
+  }
   return [
-    definition.prompt.trim(),
+    `Apply each of these ${rubrics.length} scorers to the same evidence, and give one label for each.`,
+    ...rubrics.flatMap((definition) => ['', `# Scorer ${definition.name}`, '', definition.prompt.trim(), '', 'Answer with one of these labels:', ...labelLines(definition)]),
     '',
-    'Answer with one of these labels:',
-    ...definition.labels.map((label) => `- ${label.value}: ${label.description}`),
-    '',
-    'Reply with JSON: {"label": "<one label>", "reasoning": "<why>"}',
+    `Reply with JSON: {${rubrics.map((definition) => `"${definition.name}": {"label": "<one label>", "reasoning": "<why>"}`).join(', ')}}`,
     '',
   ].join('\n');
 }
 
-/** The JSON Schema of the judge's answer: one of the scorer's labels and the reasoning for it. */
-export function answerSchema(definition: ScorerDefinition): Record<string, unknown> {
+function labelSchema(definition: ScorerDefinition): Record<string, unknown> {
   return {
     type: 'object',
     required: ['label', 'reasoning'],
     additionalProperties: false,
     properties: { label: { enum: definition.labels.map((label) => label.value) }, reasoning: { type: 'string' } },
+  };
+}
+
+/** The JSON Schema of the judge's answer: a label of the scorer and the reasoning for it, or one of those per scorer of a batch. */
+export function answerSchema(rubrics: Rubrics): Record<string, unknown> {
+  const [only, ...others] = rubrics;
+  if (others.length === 0) return labelSchema(only);
+  return {
+    type: 'object',
+    required: rubrics.map((definition) => definition.name),
+    additionalProperties: false,
+    properties: Object.fromEntries(rubrics.map((definition) => [definition.name, labelSchema(definition)])),
   };
 }
 

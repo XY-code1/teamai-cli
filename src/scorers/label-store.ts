@@ -24,6 +24,11 @@ export function reasoningPath(config: LocalConfig, id: string): string {
   return path.join(scoresDir(config), 'reasoning', `${id}.md`);
 }
 
+/** What a member can do with a label that did not pass: turn its reasoning into a learning for the team. */
+export function shareFailedLabelHint(reasoningFile: string): string {
+  return `To share what went wrong, ask your agent to read ${reasoningFile} and share it with the team (teamai contribute).`;
+}
+
 /** Where a label is published: the member's file for the UTC month it was scored in. */
 function publishedPath(username: string, label: ScoreLabel): string {
   return `scores/${username}/${label.scoredAt.slice(0, 7)}.jsonl`;

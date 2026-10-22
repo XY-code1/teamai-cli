@@ -74,6 +74,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -91,7 +92,7 @@ function plantSession(cwd: string, sessionId: string, text: string): void {
     + line({ type: 'assistant', uuid: 'a2', parentUuid: 'a1', isSidechain: true, message: { role: 'assistant', content: [{ type: 'text', text: 'helper done' }] } }));
 }
 
-async function scoredRun(driver: 'external' | 'local' = 'external', files: Record<string, string | Uint8Array> = {}): Promise<{ config: LocalConfig; runId: string; checkout: string; from: string; to: string }> {
+async function scoredRun(driver: 'external' | 'local' = 'external', files: Record<string, string | Uint8Array> = {}, scorer = SCORER): Promise<{ config: LocalConfig; runId: string; checkout: string; from: string; to: string }> {
   const checkout = path.join(root, 'app');
   const work: DriverIdentity = driver === 'local' ? { kind: 'local', machine: 'm1', workspace: checkout } : external;
   fs.mkdirSync(path.join(checkout, 'src'), { recursive: true });
@@ -109,7 +110,7 @@ async function scoredRun(driver: 'external' | 'local' = 'external', files: Recor
   fs.mkdirSync(path.join(knowledge, 'workflows'), { recursive: true });
   fs.mkdirSync(path.join(knowledge, 'scorers'), { recursive: true });
   fs.writeFileSync(path.join(knowledge, 'workflows', 'build.yaml'), WORKFLOW);
-  fs.writeFileSync(path.join(knowledge, 'scorers', 'quality.md'), SCORER);
+  fs.writeFileSync(path.join(knowledge, 'scorers', 'quality.md'), scorer);
   const config: LocalConfig = {
     repo: { localPath: knowledge, remote: 'local', kind: 'self' },
     username: 'tester', scope: 'project', additionalRoles: [], projectRoot: checkout, dataHome: path.join(root, 'data'),
@@ -219,6 +220,36 @@ describe('judge evidence', () => {
     expect(files.filter((name) => read(path.join(lease.evidence, name)).includes(SECRET))).toEqual([]);
     expect(fs.existsSync(path.join(lease.evidence, 'repo', 'logo.png'))).toBe(false);
     expect(json(path.join(lease.evidence, 'evidence.json'))).toMatchObject({ gaps: ['files_omitted'], omitted: ['repo/logo.png'] });
+  });
+
+  it('masks the value of a secret the team declares, whatever its name', async () => {
+    const dsn = 'mysql-prod-7Hq2xVb9Lk';
+    const { config, checkout } = await scoredRun('external', { 'deploy.env': `WAREHOUSE=${dsn}\n` });
+    fs.mkdirSync(path.join(config.repo.localPath, 'env'), { recursive: true });
+    fs.writeFileSync(path.join(config.repo.localPath, 'env', 'secrets.yaml'), 'secrets:\n  - key: WAREHOUSE_DSN\n');
+    vi.stubEnv('WAREHOUSE_DSN', dsn);
+    plantSession(checkout, 'session-write', `Add retries against ${dsn}.`);
+
+    const lease = LeaseSchema.parse(data(await nextJudgeLease(config, request)).lease);
+
+    const files = fs.readdirSync(lease.evidence, { recursive: true, encoding: 'utf8' }).filter((name) => fs.statSync(path.join(lease.evidence, name)).isFile());
+    expect(files.filter((name) => read(path.join(lease.evidence, name)).includes(dsn))).toEqual([]);
+    expect(read(path.join(lease.evidence, 'repo', 'deploy.env'))).toContain('WAREHOUSE_DSN');
+    expect(read(path.join(lease.evidence, 'transcripts', 'write#1.md'))).toContain('Add retries against');
+  });
+
+  it('masks a secret the team declares in the scorer\'s prompt as well', async () => {
+    const dsn = 'mysql-prod-7Hq2xVb9Lk';
+    const { config } = await scoredRun('external', {}, SCORER.replace('Judge the work.', `Judge the work. Fail any change that connects with ${dsn}.`));
+    fs.mkdirSync(path.join(config.repo.localPath, 'env'), { recursive: true });
+    fs.writeFileSync(path.join(config.repo.localPath, 'env', 'secrets.yaml'), 'secrets:\n  - key: WAREHOUSE_DSN\n');
+    vi.stubEnv('WAREHOUSE_DSN', dsn);
+
+    const lease = LeaseSchema.parse(data(await nextJudgeLease(config, request)).lease);
+
+    const prompt = read(lease.prompt);
+    expect(prompt).toContain('Fail any change that connects with');
+    expect(prompt).not.toContain(dsn);
   });
 
   it('reads the transcript of a pass the local driver ran in its own worktree', async () => {

@@ -12,9 +12,9 @@ import { execCommand, probeBinary } from '../utils/exec.js';
 import { stopProcess } from '../tool-launch/process-stop.js';
 import { toolStdout } from '../tool-launch/stdout.js';
 import { LAUNCH_TOOLS, localToolFamily, opencodeModelArgs, type LaunchTool } from '../tool-launch/tools.js';
+import { JudgeAnswerSchema, type JudgeAnswer } from './batch.js';
 import type { ScoreLabel, Isolation, JudgeAccess, JudgeUsage } from './label.js';
 
-const Answer = z.object({ label: z.string().min(1), reasoning: z.string() });
 const RecordSchema = z.record(z.unknown());
 const COMMON_ENV = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SystemRoot', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TERM', 'USER', 'LOGNAME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'NODE_EXTRA_CA_CERTS'];
 const CLAUDE_ENV = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY'];
@@ -51,7 +51,7 @@ export interface JudgeInput {
 }
 
 export type LocalJudgeResult =
-  | { ok: true; answer: z.infer<typeof Answer>; judge: Omit<Extract<ScoreLabel['judge'], { kind: 'model' }>, 'kind'> }
+  | { ok: true; answer: JudgeAnswer; judge: Omit<Extract<ScoreLabel['judge'], { kind: 'model' }>, 'kind'> }
   | { ok: false; code: 'judge_failed' | 'judge_answer_invalid' | 'judge_tool_unavailable'; message: string; raw?: string; usage?: JudgeUsage };
 
 function memberEnv(): NodeJS.ProcessEnv {
@@ -161,12 +161,12 @@ function records(stdout: string): Array<Record<string, unknown>> {
   });
 }
 
-function answerFrom(tool: JudgeTool, stdout: string): z.infer<typeof Answer> | undefined {
+function answerFrom(tool: JudgeTool, stdout: string): JudgeAnswer | undefined {
   const family = judgeFamily(tool);
   const events = records(stdout);
   if (family === 'claude' || family === 'codebuddy') {
     const last = events.filter((record) => record.type === 'result').at(-1);
-    const structured = Answer.safeParse(last?.structured_output);
+    const structured = JudgeAnswerSchema.safeParse(last?.structured_output);
     if (structured.success) return structured.data;
     return parseAnswer(typeof last?.result === 'string' ? last.result : '');
   }
@@ -179,9 +179,9 @@ function answerFrom(tool: JudgeTool, stdout: string): z.infer<typeof Answer> | u
   return parseAnswer(texts.join('\n'));
 }
 
-function parseAnswer(text: string): z.infer<typeof Answer> | undefined {
+function parseAnswer(text: string): JudgeAnswer | undefined {
   try {
-    const parsed = Answer.safeParse(JSON.parse(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')));
+    const parsed = JudgeAnswerSchema.safeParse(JSON.parse(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')));
     return parsed.success ? parsed.data : undefined;
   } catch { return undefined; }
 }

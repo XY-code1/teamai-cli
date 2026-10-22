@@ -76,6 +76,15 @@ JSON
 
 `can.judge.access` 说明你的评审能做什么：`answer`（不用工具）、`read`（读取证据）或 `full`（任意工具，默认值）。它的标签会记录该值。评分器未列出的标签会被拒绝，租约保持打开。`workflow next` 从不分发评审任务。所有字段见 `teamai score --help`。
 
+使用 `scorers: { names: [review-quality, test-coverage], batch: true }` 时，同一轮中解析到相同工具和模型的评分器共用一个租约、一个证据目录和一个提示。租约列出 `scorers` 并带有 `batched: true`，答案为每个评分器给出一个标签：
+
+```json
+{"driver":{"kind":"t3","machine":"m1","workspace":"/work"},"outcome":"success",
+ "answer":{"review-quality":{"label":"good","reasoning":"…"},"test-coverage":{"label":"thin","reasoning":"…"}}}
+```
+
+每个标签记录 `judge.batched: true`。只要有一个标签不在对应评分器的列表中，整个答案都会被拒绝，租约保持打开。
+
 标签存放位置：
 
 | 路径 | 内容 |

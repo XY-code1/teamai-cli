@@ -44,6 +44,8 @@ const AttemptBase = {
   expiresAt: z.string(),
   /** What the lease's judge calls spent so far, on the first scorer of a batch only; a failed local call adds to it. */
   usage: JudgeUsageSchema.optional(),
+  /** In a batch, the entries of every scorer the lease judges, in the step's order; each has an attempt of this id. */
+  batch: z.array(z.string().regex(ENTRY_ID)).min(2).optional(),
 };
 const Settled = { ...AttemptBase, settledAt: z.string() };
 

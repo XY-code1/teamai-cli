@@ -53,7 +53,7 @@ steps:
     scorers: { names: [review-quality], batch: false }
 ```
 
-With `batch: true`, one judge call takes a step's scorers together. A step's `batch` wins over `defaults.scorers.batch`, which wins over `scoring.batch` in `teamai.yaml`. A name with no valid `scorers/<name>.md` fails `teamai review --branch`; `teamai pull` warns and the step runs without it. An older teamai does not know `scorers`, so update every member and runner before a workflow they run lists one.
+With `batch: true`, one judge call takes a step's scorers together when they resolve to the same tool and model. A step's `batch` wins over `defaults.scorers.batch`, which wins over `scoring.batch` in `teamai.yaml`. A name with no valid `scorers/<name>.md` fails `teamai review --branch`; `teamai pull` warns and the step runs without it. An older teamai does not know `scorers`, so update every member and runner before a workflow they run lists one.
 
 Every step after the first lists the steps it waits for in `needs`. `needs: []` starts another branch with no dependency. Each `next` leases the first step in the file whose needs are done. `--driver local` runs one step at a time unless `workflows.max_parallel` is above 1. A step is skipped when a step it needs failed, or when every step it needs was skipped. A skipped step never runs. A failure does not stop other branches. When nothing is left to run, the run ends `failed` if any step failed, otherwise `succeeded`. A missing `needs`, a `needs` id that is not a step, or a cycle makes the file invalid. A missing `needs` also leaves the workflow with nothing to run, even when an older version was valid.
 

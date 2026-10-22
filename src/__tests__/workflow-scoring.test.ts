@@ -4,9 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import type { JudgeAnswer } from '../scorers/batch.js';
 import { localAliasesPath } from '../models/aliases.js';
+import { AttemptStore } from '../scorers/attempts.js';
 import { LabelStore } from '../scorers/label-store.js';
-import type { LocalConfig } from '../types.js';
+import { getReportsDir, type LocalConfig } from '../types.js';
+import { log } from '../utils/logger.js';
 import { syncWorkflowDefinitions } from '../workflow/cache.js';
 import { leaseNext, reportAttempt, startRun } from '../workflow/engine.js';
 import { workflowRunDetail } from '../dashboard/workflow-runs.js';
@@ -18,6 +21,7 @@ import type { DriverIdentity, RunState, WorkflowEnvelope } from '../workflow/typ
 
 const dirs: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -220,11 +224,14 @@ console.log(JSON.stringify({ type: 'result', structured_output: { label: 'great'
     // The lease stays open: the same driver gets it back.
     expect(data(await nextJudgeLease(config, request())).lease).toMatchObject({ ref: lease.ref, handedBack: true });
 
+    const info = vi.spyOn(log, 'info');
     const good = data(await submitJudgeLease(config, lease.ref, {
       driver: judgeDriver, outcome: 'success', answer: { label: 'missed', reasoning: 'It skipped the race.' },
       judge: { tool: 'claude', model: 'm1', usage: { inputTokens: 10, outputTokens: 2 } },
     }));
     expect(good).toMatchObject({ label: { scorer: 'quality', label: 'missed', score: 0, passed: false } });
+    const { reasoning } = z.object({ reasoning: z.string() }).parse(good.label);
+    expect(info.mock.calls).toEqual([[`To share what went wrong, ask your agent to read ${reasoning} and share it with the team (teamai contribute).`]]);
     const labels = fs.readFileSync(path.join(config.dataHome ?? '', 'scores', 'labels.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as unknown);
     expect(labels).toEqual([expect.objectContaining({
       scorer: 'quality', label: 'missed', score: 0, passed: false, source: 'workflow', subject: { runId, step: 'review', pass: 1 },
@@ -233,6 +240,7 @@ console.log(JSON.stringify({ type: 'result', structured_output: { label: 'great'
     expect(fs.existsSync(lease.evidence)).toBe(false);
     // A repeated submit answers the same label; nothing is left to judge.
     expect(data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: { label: 'good', reasoning: 'x' } }))).toEqual(good);
+    expect(info).toHaveBeenCalledTimes(1);
     expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 } });
     // Scoring never writes the run file.
     expect(fs.readFileSync(path.join(config.dataHome ?? '', 'workflows', 'runs', `${runId}.json`), 'utf8')).toBe(before);
@@ -567,6 +575,186 @@ describe('run snapshot', () => {
   });
 });
 
+describe('batched judge work', () => {
+  const tests = (extra = '') => `---
+labels:
+  - { value: covered, score: 1, description: Tests cover the change }
+  - { value: thin, score: 0, description: Tests miss the change }
+passingScore: 0.5
+samplingRate: 100
+${extra}---
+Judge the tests.
+`;
+  const workflow = (scorers: string) => `schemaVersion: v1alpha1
+name: review
+description: One reviewed step.
+steps:
+  - id: review
+    prompt: Review the change.
+    scorers: ${scorers}
+`;
+  function batchFixture(scorers: string, testsExtra = '', team = ''): LocalConfig {
+    const config = fixture(scorer(100));
+    fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'tests.md'), tests(testsExtra));
+    fs.writeFileSync(path.join(config.repo.localPath, 'workflows', 'review.yaml'), workflow(scorers));
+    if (team) fs.writeFileSync(path.join(config.repo.localPath, 'teamai.yaml'), `team: t\nrepo: https://example.test/t.git\n${team}`);
+    return config;
+  }
+  const BatchLeaseSchema = LeaseSchema.extend({ scorers: z.array(z.string()), batched: z.literal(true), answer: z.object({ schema: z.record(z.unknown()) }) });
+  const labelsOf = (config: LocalConfig): unknown[] =>
+    fs.readFileSync(path.join(config.dataHome ?? '', 'scores', 'labels.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as unknown);
+  const both = { quality: { label: 'good', reasoning: 'Found the defect.' }, tests: { label: 'thin', reasoning: 'No test for it.' } };
+
+  it('gives the scorers of one pass one lease, one evidence dir, one prompt with each rubric, and one label per scorer', async () => {
+    const config = batchFixture('{ names: [quality, tests], batch: true }');
+    const runId = await settledRun(config);
+
+    const lease = BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease);
+    expect(lease).toMatchObject({ scorers: ['quality', 'tests'], batched: true, subject: { runId, step: 'review', pass: 1 }, judge: { tool: 'claude' } });
+    expect(lease.answer.schema).toMatchObject({
+      required: ['quality', 'tests'],
+      properties: { quality: { properties: { label: { enum: ['good', 'missed'] } } }, tests: { properties: { label: { enum: ['covered', 'thin'] } } } },
+    });
+    const prompt = fs.readFileSync(lease.prompt, 'utf8');
+    expect(prompt).toContain('Judge the review.');
+    expect(prompt).toContain('Judge the tests.');
+    expect(data(await nextJudgeLease(config, request({ driver: { ...judgeDriver, machine: 'm2' } })))).toEqual({ idle: { open: 0, leased: 2 } });
+
+    const settled = data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: both, judge: { tool: 'claude' } }));
+    expect(settled).toMatchObject({ labels: [{ scorer: 'quality', label: 'good', passed: true }, { scorer: 'tests', label: 'thin', passed: false }] });
+    expect(labelsOf(config)).toEqual([
+      expect.objectContaining({ scorer: 'quality', label: 'good', judge: expect.objectContaining({ tool: 'claude', batched: true }) }),
+      expect.objectContaining({ scorer: 'tests', label: 'thin', judge: expect.objectContaining({ tool: 'claude', batched: true }) }),
+    ]);
+    expect(fs.existsSync(lease.evidence)).toBe(false);
+    expect(data(await nextJudgeLease(config, request()))).toEqual({ idle: { open: 0, leased: 0 } });
+    expect(data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: both }))).toEqual(settled);
+  });
+
+  it('counts a batch\'s one judge call once in both the local and the published totals', async () => {
+    const config = batchFixture('{ names: [quality, tests], batch: true }');
+    const runId = await settledRun(config);
+    const lease = BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease);
+    const usage = { inputTokens: 4, outputTokens: 235 };
+
+    data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: both, judge: { tool: 'claude', usage } }));
+
+    expect((await workflowRunDetail(config, 'local', runId))?.scoring).toEqual({ judged: 2, ...usage });
+    const published = path.join(getReportsDir(config), 'scores', 'tester', '2026-10.jsonl');
+    fs.mkdirSync(path.dirname(published), { recursive: true });
+    fs.writeFileSync(published, labelsOf(config).map((label) => `${JSON.stringify(label)}\n`).join(''));
+    expect(await LabelStore.scoringTotal(config, runId, 'published')).toEqual({ judged: 2, ...usage });
+  });
+
+  it('rejects the whole answer when one label is not its scorer\'s, and keeps the lease open', async () => {
+    const config = batchFixture('{ names: [quality, tests], batch: true }');
+    await settledRun(config);
+    const lease = BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease);
+
+    const wrong: JudgeAnswer[] = [{ ...both, tests: { label: 'good', reasoning: 'r' } }, { quality: both.quality }, { label: 'good', reasoning: 'r' }];
+    for (const answer of wrong) {
+      expect(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer })).toMatchObject({ error: { code: 'label_invalid' } });
+    }
+    expect(fs.existsSync(path.join(config.dataHome ?? '', 'scores', 'labels.jsonl'))).toBe(false);
+    expect(data(await nextJudgeLease(config, request())).lease).toMatchObject({ ref: lease.ref, handedBack: true, scorers: ['quality', 'tests'] });
+    expect(data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: both }))).toMatchObject({ labels: [{ label: 'good' }, { label: 'thin' }] });
+  });
+
+  it('takes a batch afresh after an interrupted lease wrote only some of its scorers', async () => {
+    const config = batchFixture('{ names: [quality, tests], batch: true }');
+    await settledRun(config);
+    const write = AttemptStore.write;
+    const interrupted = vi.spyOn(AttemptStore, 'write').mockImplementation(async (...args) => {
+      if (args[1].scorer === 'tests') throw new Error('interrupted');
+      return write(...args);
+    });
+    await expect(nextJudgeLease(config, request())).rejects.toThrow('interrupted');
+    interrupted.mockRestore();
+
+    const lease = BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease);
+    expect(lease.scorers).toEqual(['quality', 'tests']);
+    expect(data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: both }))).toHaveProperty('labels');
+  });
+
+  it('offers the rest of a batch again after a submit labelled only some of its scorers', async () => {
+    const config = batchFixture('{ names: [quality, tests], batch: true }');
+    await settledRun(config);
+    const lease = BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease);
+    const append = LabelStore.append;
+    const interrupted = vi.spyOn(LabelStore, 'append').mockImplementation(async (...args) => {
+      if (args[1].scorer === 'tests') throw new Error('interrupted');
+      return append(...args);
+    });
+    await expect(submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: both })).rejects.toThrow('interrupted');
+    interrupted.mockRestore();
+
+    const rest = leaseOf(await nextJudgeLease(config, request()));
+    expect(rest).toMatchObject({ scorer: 'tests' });
+    data(await submitJudgeLease(config, rest.ref, { driver: judgeDriver, outcome: 'success', answer: both.tests }));
+    expect(labelsOf(config)).toEqual([expect.objectContaining({ scorer: 'quality', label: 'good' }), expect.objectContaining({ scorer: 'tests', label: 'thin' })]);
+  });
+
+  it('renews and releases a batch lease as one', async () => {
+    const config = batchFixture('{ names: [quality, tests], batch: true }');
+    await settledRun(config);
+    const lease = BatchLeaseSchema.parse(data(await nextJudgeLease(config, request(), '2026-10-22T12:00:00.000Z')).lease);
+
+    expect(data(await nextJudgeLease(config, request({ running: [lease.ref] }), '2026-10-22T12:20:00.000Z'))).toEqual({ idle: { open: 0, leased: 2 } });
+    expect(data(await nextJudgeLease(config, request({ driver: { ...judgeDriver, machine: 'm2' } }), '2026-10-22T12:40:00.000Z'))).toEqual({ idle: { open: 0, leased: 2 } });
+    expect(data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'released' }, '2026-10-22T12:41:00.000Z'))).toEqual({ settled: { ref: lease.ref, status: 'released' } });
+    expect(BatchLeaseSchema.parse(data(await nextJudgeLease(config, request(), '2026-10-22T12:42:00.000Z')).lease).scorers).toEqual(['quality', 'tests']);
+  });
+
+  it('never batches scorers that resolve to different models, nor scorers no layer batches', async () => {
+    for (const config of [batchFixture('{ names: [quality, tests], batch: true }', 'model: judge-x\n'), batchFixture('[quality, tests]')]) {
+      await settledRun(config);
+      const first = leaseOf(await nextJudgeLease(config, request()));
+      expect(first).toMatchObject({ scorer: 'quality' });
+      expect(first).not.toHaveProperty('batched');
+      expect(leaseOf(await nextJudgeLease(config, request({ driver: { ...judgeDriver, machine: 'm2' } })))).toMatchObject({ scorer: 'tests' });
+    }
+  });
+
+  it('batches scorers whose aliases give the same model, and labels each with its own alias', async () => {
+    const config = batchFixture('{ names: [quality, tests], batch: true }', 'model: cheap\n');
+    fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'quality.md'), scorer(100).replace('samplingRate: 100', 'samplingRate: 100\nmodel: fast'));
+    fs.mkdirSync(path.join(config.repo.localPath, 'models'));
+    fs.writeFileSync(path.join(config.repo.localPath, 'models', 'aliases.yaml'), 'aliases:\n  fast:\n    claude: haiku\n  cheap:\n    claude: haiku\n');
+    await settledRun(config);
+    const lease = BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease);
+
+    data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: both }));
+
+    expect(labelsOf(config)).toEqual([
+      expect.objectContaining({ scorer: 'quality', judge: expect.objectContaining({ model: { requested: 'haiku', alias: 'fast' }, batched: true }) }),
+      expect.objectContaining({ scorer: 'tests', judge: expect.objectContaining({ model: { requested: 'haiku', alias: 'cheap' }, batched: true }) }),
+    ]);
+  });
+
+  it('judges a batch locally in one tool run that answers every scorer', async () => {
+    const config = batchFixture('{ names: [quality, tests], batch: true }');
+    await settledRun(config);
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+const fs = require('fs');
+if (process.argv.includes('--version')) { console.log('2.1.308 (Claude Code)'); process.exit(); }
+fs.appendFileSync(${JSON.stringify(path.join(bin, 'runs'))}, 'run\\n');
+process.stdin.resume(); process.stdin.on('end', () => console.log(JSON.stringify({ type: 'result', structured_output: ${JSON.stringify(both)} })));\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+    const lease = BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease);
+
+    expect(data(await runJudgeLease(config, lease.ref, { driver: judgeDriver }))).toMatchObject({ labels: [{ scorer: 'quality', label: 'good' }, { scorer: 'tests', label: 'thin' }] });
+    expect(fs.readFileSync(path.join(bin, 'runs'), 'utf8')).toBe('run\n');
+  });
+
+  it('batches from the team\'s scoring.batch when neither the step nor its workflow says', async () => {
+    const config = batchFixture('[quality, tests]', '', 'scoring:\n  batch: true\n');
+    await settledRun(config);
+    expect(BatchLeaseSchema.parse(data(await nextJudgeLease(config, request())).lease).scorers).toEqual(['quality', 'tests']);
+  });
+});
+
 describe('judge model identity', () => {
   const withModel = (model: string) => scorer(100).replace('samplingRate: 100', `samplingRate: 100\nmodel: ${model}`);
   const teamAliases = (config: LocalConfig, yaml: string) => {
@@ -575,6 +763,7 @@ describe('judge model identity', () => {
   };
   const labelsOf = (config: LocalConfig): unknown[] =>
     fs.readFileSync(path.join(config.dataHome ?? '', 'scores', 'labels.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as unknown);
+  afterEach(() => fs.rmSync(localAliasesPath(), { force: true }));
 
   it('records the model the lease named and the scorer\'s alias on the label of a submission that names no model', async () => {
     const config = fixture(withModel('fast'));

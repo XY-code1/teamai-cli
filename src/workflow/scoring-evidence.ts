@@ -4,12 +4,13 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { AgentSession } from '../session-flow/agent-session.js';
 import type { Session } from '../session-flow/ir.js';
-import { redactWithEnv } from '../utils/redact.js';
+import { collectTeamSecrets } from '../env-resolution.js';
+import type { LocalConfig } from '../types.js';
+import { collectEnvSecrets, redact } from '../utils/redact.js';
 import {
   fencedEvidence, isEvidenceReady, keepEnds, rubricPrompt, writeEvidence,
-  SESSION_MAX_CHARS, SUBAGENT_MAX_CHARS, TOOL_CALL_MAX_CHARS, type EvidenceGap,
+  SESSION_MAX_CHARS, SUBAGENT_MAX_CHARS, TOOL_CALL_MAX_CHARS, type EvidenceGap, type Rubrics,
 } from '../scorers/evidence.js';
-import type { ScorerDefinition } from '../scorers/definition.js';
 import type { RunSubject } from '../scorers/label.js';
 import { firstSettled, isUnder, passRange, passesWithin, runPasses } from './loop.js';
 import { stepDefinitions } from './scope.js';
@@ -81,7 +82,7 @@ function textOf(blob: Buffer): string | undefined {
 }
 
 /** Writes the tracked files at `commit` into `dir`, redacted; a file that is not text is left out and named in `omitted`. */
-async function exportRepo(checkout: string, commit: string, dir: string, omitted: string[]): Promise<Array<{ title: string; body: string }>> {
+async function exportRepo(checkout: string, commit: string, dir: string, omitted: string[], mask: (text: string) => string): Promise<Array<{ title: string; body: string }>> {
   const files = (await git(checkout, ['ls-tree', '-rz', '--full-tree', commit])).split('\0');
   const sections: Array<{ title: string; body: string }> = [];
   for (const file of files) {
@@ -98,7 +99,7 @@ async function exportRepo(checkout: string, commit: string, dir: string, omitted
       omitted.push(`repo/${name}`);
       continue;
     }
-    const body = redactWithEnv(text);
+    const body = mask(text);
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, body);
     sections.push({ title: `repo/${name}`, body });
@@ -106,8 +107,11 @@ async function exportRepo(checkout: string, commit: string, dir: string, omitted
   return sections;
 }
 
-export async function buildEvidence(run: RunState, subject: RunSubject, definition: ScorerDefinition, dir: string): Promise<{ ok: true } | { ok: false; code: 'evidence_empty' }> {
+/** Evidence is redacted of secret shapes, secret-named env values, and the values of the secrets the team declares. */
+export async function buildEvidence(config: LocalConfig, run: RunState, subject: RunSubject, rubrics: Rubrics, dir: string): Promise<{ ok: true } | { ok: false; code: 'evidence_empty' }> {
   if (await isEvidenceReady(dir)) return { ok: true };
+  const envSecrets = { ...collectEnvSecrets(), ...await collectTeamSecrets(config) };
+  const mask = (text: string): string => redact(text, { envSecrets });
   const plan = evidencePlan(run, subject);
   const gaps = new Set(plan.gaps);
   const sections: Array<{ title: string; body: string }> = [];
@@ -121,12 +125,12 @@ export async function buildEvidence(run: RunState, subject: RunSubject, definiti
         const ranges = plan.diff ? [plan.diff] : plan.ranges;
         const patch = (await Promise.all(ranges.map((range) => git(plan.checkout ?? '', ['diff', '--no-ext-diff', '--no-textconv', range.from, range.to, '--'])))).join('\n');
         if (ranges.length > 0) {
-          const body = redactWithEnv(patch);
+          const body = mask(patch);
           await fs.writeFile(path.join(tmp, 'diff.patch'), body);
           sections.push({ title: 'diff.patch (may include merged dependencies)', body });
           content = true;
         }
-        if (plan.repoAt) sections.push(...await exportRepo(plan.checkout, plan.repoAt, repo, omitted));
+        if (plan.repoAt) sections.push(...await exportRepo(plan.checkout, plan.repoAt, repo, omitted, mask));
       } catch {
         gaps.add('commit_missing');
       }
@@ -147,10 +151,11 @@ export async function buildEvidence(run: RunState, subject: RunSubject, definiti
         body += `\n\n## Subagent (depth ${agent.depth}${agent.finished === false ? ', not finished' : ''})\n\n${transcript(agent.session, SUBAGENT_MAX_CHARS)}`;
       }
       await fs.mkdir(path.join(tmp, 'transcripts'), { recursive: true });
+      body = mask(body);
       await fs.writeFile(path.join(tmp, 'transcripts', `${name}.md`), body);
       sections.push({ title: `transcripts/${name}.md`, body });
     }
-    const outputText = redactWithEnv(JSON.stringify(outputs, null, 2));
+    const outputText = mask(JSON.stringify(outputs, null, 2));
     await fs.writeFile(path.join(tmp, 'outputs.json'), outputText);
     if (omitted.length > 0) gaps.add('files_omitted');
     const manifest = {
@@ -159,7 +164,7 @@ export async function buildEvidence(run: RunState, subject: RunSubject, definiti
     await fs.writeFile(path.join(tmp, 'evidence.json'), JSON.stringify(manifest, null, 2));
     sections.unshift({ title: 'evidence.json', body: JSON.stringify(manifest) });
     sections.push({ title: 'outputs.json', body: outputText });
-    await fs.writeFile(path.join(tmp, 'prompt.md'), rubricPrompt(definition) + fencedEvidence(sections));
+    await fs.writeFile(path.join(tmp, 'prompt.md'), mask(rubricPrompt(rubrics)) + fencedEvidence(sections));
   });
   return content ? { ok: true } : { ok: false, code: 'evidence_empty' };
 }

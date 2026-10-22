@@ -53,7 +53,7 @@ steps:
     scorers: { names: [review-quality], batch: false }
 ```
 
-`batch: true` 时，一次评审调用同时处理一个步骤的所有评分器。步骤的 `batch` 优先于 `defaults.scorers.batch`，后者优先于 `teamai.yaml` 里的 `scoring.batch`。没有有效 `scorers/<name>.md` 的名字会让 `teamai review --branch` 失败；`teamai pull` 会警告，步骤照常运行，只是不用这个评分器。旧版 teamai 不认识 `scorers`，所以在成员和运行器要运行的工作流列出评分器之前，先更新他们的 teamai。
+`batch: true` 时，解析到相同工具和模型的评分器由一次评审调用同时处理。步骤的 `batch` 优先于 `defaults.scorers.batch`，后者优先于 `teamai.yaml` 里的 `scoring.batch`。没有有效 `scorers/<name>.md` 的名字会让 `teamai review --branch` 失败；`teamai pull` 会警告，步骤照常运行，只是不用这个评分器。旧版 teamai 不认识 `scorers`，所以在成员和运行器要运行的工作流列出评分器之前，先更新他们的 teamai。
 
 第一个步骤之后的每个步骤都要用 `needs` 列出它等待的步骤。`needs: []` 表示另起一个没有依赖的分支。每次 `next` 租出文件中第一个依赖都已完成的步骤。`--driver local` 一次运行一个步骤，除非 `workflows.max_parallel` 大于 1。某个依赖失败，或所有依赖都被跳过时，该步骤会被跳过。被跳过的步骤不会运行。一个步骤失败不会停止其他分支。没有可运行的步骤时，只要有步骤失败，运行结果就是 `failed`，否则是 `succeeded`。缺少 `needs`、`needs` 中的 id 不是本工作流的步骤，或依赖成环，都会让该文件无效。缺少 `needs` 时，即使之前有有效版本，该工作流也没有可运行版本。
 
