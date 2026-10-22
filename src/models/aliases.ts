@@ -212,6 +212,40 @@ export type ModelResolution =
   | { readonly ok: true; readonly step: ResolutionStep; readonly model?: string; readonly effort?: string; readonly source?: string }
   | { readonly ok: false; readonly reason: string };
 
+/** Why a value gives the tool no model: no entry for it, the member's `~` or `default`, a model switch, or an error. */
+export type NoModel = 'unmapped' | 'local' | 'switched' | 'unresolved';
+
+/** Why a resolution step gives no model. The only other one that can is `default`: the alias does not map the tool. */
+const NO_MODEL_STEPS: Partial<Record<ResolutionStep, NoModel>> = { local: 'local', switched: 'switched' };
+
+/** Why a resolution that gives the tool no model gives none. */
+export function noModelReason(resolution: ModelResolution): NoModel {
+  return resolution.ok ? NO_MODEL_STEPS[resolution.step] ?? 'unmapped' : 'unresolved';
+}
+
+/** Why `resolution` gives `tool` no model, worded to follow "which": `has no model for codex in models/aliases.yaml`. */
+export function noModelCause(resolution: ModelResolution, tool: string): string {
+  const source = (resolution.ok && resolution.source) || TEAM_ALIASES_FILE;
+  const reason = noModelReason(resolution);
+  switch (reason) {
+    case 'unmapped': return `has no model for ${tool} in ${source}`;
+    case 'local': return `${source} turns off for ${tool}`;
+    case 'switched': return `gives no model for ${tool} while teamai models switch points ${tool} at a model profile`;
+    case 'unresolved': return `cannot be resolved for ${tool}: ${resolution.ok ? '' : resolution.reason}`;
+    default: {
+      const unhandled: never = reason;
+      return unhandled;
+    }
+  }
+}
+
+/** Why `value` cannot be a `model`, worded to follow "model", or undefined when it can: an alias or a model name as is. */
+export function modelValueProblem(value: string | undefined): string | undefined {
+  if (value?.includes('{{')) return 'cannot contain a template; write an alias or a model name as is';
+  if (!value || /\s/.test(value)) return 'must be a non-empty string without spaces';
+  return undefined;
+}
+
 /**
  * Load the aliases `localConfig`'s scope reads: the team files of its
  * checkout and the member's override. A missing file is an empty mapping, so

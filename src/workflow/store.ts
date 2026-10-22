@@ -2,10 +2,11 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { DriverSchema } from '../driver-identity.js';
 import { readFileSafe, writeFileAtomic, writeJsonAtomic } from '../utils/fs.js';
 import { getDataHome, type LocalConfig } from '../types.js';
 import { acquireLock, releaseLock } from '../update.js';
-import { ArchivedPassSchema, DriverSchema, SessionContinuationSchema, StepStateSchema } from './step-state.js';
+import { ArchivedPassSchema, SessionContinuationSchema, StepStateSchema } from './step-state.js';
 import type { HandoffOwner } from './snapshot.js';
 import type { RunState, WorkflowDefinition } from './types.js';
 

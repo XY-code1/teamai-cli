@@ -7,7 +7,7 @@ import { ALL_SUPPORTED_TOOLS, EXTRAS_BASE_TOOL, type ToolName } from '../resourc
 import { isToolId, TOOLS, type ToolDescriptor } from '../tools.js';
 import { DEFAULT_TOOL_PATHS, scopedToolPaths, TeamaiConfigSchema, type ToolId } from '../types.js';
 import { CODEX_TOOL_IDS, normalizeAgentType } from '../utils/tool-names.js';
-import type { LocalWorkflowTool } from '../workflow/local-tool-adapter.js';
+import type { LocalWorkflowTool } from '../tool-launch/tools.js';
 
 const TOOL_IDS = Object.keys(DEFAULT_TOOL_PATHS).filter(isToolId);
 const USER_PATHS = scopedToolPaths(TeamaiConfigSchema.parse({ team: 't', repo: 'https://example.com/t.git' }), { scope: 'user' });

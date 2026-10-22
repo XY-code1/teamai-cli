@@ -20,12 +20,13 @@ import type { LocalConfig } from '../types.js';
 import { getDataHome, isUsageReportEnabled } from '../types.js';
 import { log } from '../utils/logger.js';
 import { acquireLock, releaseLock } from '../update.js';
-import { isLocalWorkflowTool } from './local-tool-adapter.js';
+import { isLocalWorkflowTool } from '../tool-launch/tools.js';
 import { stepDefinitions } from './scope.js';
 import { snapshotPath } from './snapshot.js';
 import { installOwner, runLockPath } from './store.js';
 import { settled, VISIBLE_OUTCOMES, type StepPass, type StepState, type VisibleOutcome } from './step-state.js';
-import type { DriverIdentity, RunState, RunStatus, TokenUsage, WorkflowFailure } from './types.js';
+import type { TokenUsage } from '../tool-launch/stdout.js';
+import type { DriverIdentity, RunState, RunStatus, WorkflowFailure } from './types.js';
 
 /**
  * The failure codes the engine writes, then those the local driver sets. A code a model writes into its result, or

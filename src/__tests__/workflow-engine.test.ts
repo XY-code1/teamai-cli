@@ -13,7 +13,8 @@ import { getCurrentVersion } from '../package-info.js';
 import { outputMismatch } from '../workflow/output.js';
 import { pendingRecords, type WorkflowRunRecord } from '../workflow/records.js';
 import { readRun, runFilePath, runLockPath, updateRun } from '../workflow/store.js';
-import type { DriverIdentity, RunState, TokenUsage } from '../workflow/types.js';
+import type { TokenUsage } from '../tool-launch/stdout.js';
+import type { DriverIdentity, RunState } from '../workflow/types.js';
 
 const dirs: string[] = [];
 

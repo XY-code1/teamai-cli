@@ -28,15 +28,13 @@ import { respondToHitl } from './run-controls.js';
 import { isRecord } from './expression.js';
 import {
   createLocalToolAdapter,
-  isLocalWorkflowTool,
-  localToolFamily,
   type LocalToolAdapter,
   type LocalToolResult,
   type LocalToolRun,
-  type LocalWorkflowTool,
 } from './local-tool-adapter.js';
 import { driverLockPath, isRunId, readRun, updateRun } from './store.js';
-import { stopProcess } from './process-stop.js';
+import { stopProcess } from '../tool-launch/process-stop.js';
+import { isLocalWorkflowTool, localToolFamily, type LocalWorkflowTool } from '../tool-launch/tools.js';
 import { chooseStepModel } from './step-model.js';
 import type { StepRead } from './step-state.js';
 import type { DriverIdentity, StepHitl, WorkflowEnvelope, WorkflowFailure } from './types.js';

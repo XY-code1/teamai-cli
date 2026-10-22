@@ -16,6 +16,7 @@ import {
 } from './reads.js';
 import { parseHitl } from './parse-hitl.js';
 import { loopProblems } from './loop.js';
+import { modelValueProblem } from '../models/aliases.js';
 
 const HEADER_KEYS = new Set(['schemaVersion', 'name', 'description', 'inputs', 'defaults', 'ends', 'outputs', 'loop', 'steps']);
 const ACTION_KEYS = Object.keys(STEP_ACTIONS);
@@ -771,12 +772,9 @@ function parseForEach(node: Node | null | undefined, field: string, label: strin
 function parseModel(node: Node | null | undefined, field: string, ctx: ParseContext): string | undefined {
   const { file, lineCounter, diagnostics } = ctx;
   const model = scalarString(node);
-  if (model?.includes('{{')) {
-    diagnostics.push(locate(file, lineCounter, node, field, 'model cannot contain a template; write an alias or a model name as is'));
-    return undefined;
-  }
-  if (!model || /\s/.test(model)) {
-    diagnostics.push(locate(file, lineCounter, node, field, 'model must be a non-empty string without spaces'));
+  const problem = modelValueProblem(model);
+  if (problem !== undefined) {
+    diagnostics.push(locate(file, lineCounter, node, field, `model ${problem}`));
     return undefined;
   }
   return model;

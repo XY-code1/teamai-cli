@@ -18,7 +18,8 @@ import { locateStep } from '../workflow/engine.js';
 import { buildEndRecord, RECORDS_DIR, runRecordStates, type RecordState, type WorkflowRunRecord } from '../workflow/records.js';
 import { respondToHitl } from '../workflow/run-controls.js';
 import { isRunId, readRun, runsDir } from '../workflow/store.js';
-import type { StepHitl, RunState, TokenUsage } from '../workflow/types.js';
+import type { TokenUsage } from '../tool-launch/stdout.js';
+import type { StepHitl, RunState } from '../workflow/types.js';
 import { HttpError } from './http.js';
 
 /** The newest runs each source lists; a run still running on this machine is always listed. */

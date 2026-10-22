@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { parseReportedAgent, settleObservation, type ReportedAgent } from '../agent-observation.js';
+import { DriverSchema } from '../driver-identity.js';
 import { log } from '../utils/logger.js';
 import type { LocalConfig } from '../types.js';
 import { loadCachedWorkflow, loadWorkflowTree } from './cache.js';
@@ -17,7 +18,7 @@ import {
 } from './template.js';
 import { parseStepPath } from './step-path.js';
 import {
-  DriverSchema, ReadSchema, answerHitl, cancel, fail, lease, release, settled, skip, start, stopped, succeed, waitForAnswer,
+  ReadSchema, answerHitl, cancel, fail, lease, release, settled, skip, start, stopped, succeed, waitForAnswer,
   type ItemResult, type LeasedStep, type StepRead, type StepState,
 } from './step-state.js';
 import { addItems, afterStanding, expandItems, isItem, itemsAfter, itemsOf, itemsSettled, startedItems } from './fan-out.js';
@@ -32,12 +33,12 @@ import type {
   RunStatus,
   StepLease,
   StepOutcome,
-  TokenUsage,
   WorkflowEnvelope,
   WorkflowFailure,
   WorkflowStep,
 } from './types.js';
 import { hasAction } from './types.js';
+import type { TokenUsage } from '../tool-launch/stdout.js';
 
 /**
  * Recent settled attempt ids kept for `repeated_report`.

@@ -188,12 +188,6 @@ export interface StepLease {
   session?: LeaseSession;
 }
 
-export interface TokenUsage {
-  input?: number;
-  output?: number;
-  cachedInput?: number;
-}
-
 export interface WorkflowFailure {
   code: string;
   message: string;

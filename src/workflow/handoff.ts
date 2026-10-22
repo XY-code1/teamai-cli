@@ -5,12 +5,13 @@ import { collectTeamSecrets } from '../env-resolution.js';
 import { AgentSession } from '../session-flow/agent-session.js';
 import { archiveSessions, type ArchiveSessionRef } from '../session-flow/archive.js';
 import { usesBranchWorktree, type LocalConfig } from '../types.js';
+import { canonicalJson } from '../utils/canonical-json.js';
 import { collectEnvSecrets, sanitizeGitUrl } from '../utils/redact.js';
 import { fetchReportsOriginFile, updateReports, type ReportsChange } from '../utils/reports-branch.js';
 import { loadWorkflowBundle, loadWorkflowBundleAt, type WorkflowBundle } from './cache.js';
 import { pendingRecords, publishPendingRecords, type RecordDelivery } from './records.js';
 import {
-  canonicalJson, definitionHash, parseSnapshot, projectRun, snapshotBody, snapshotPath, snapshotText,
+  definitionHash, parseSnapshot, projectRun, snapshotBody, snapshotPath, snapshotText,
   type HandoffOwner, type RunSnapshot, type SnapshotBody, type SnapshotError,
 } from './snapshot.js';
 import { takeOver, type UnleasedStep } from './step-state.js';

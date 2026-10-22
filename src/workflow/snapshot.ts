@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { canonicalJson } from '../utils/canonical-json.js';
 import { redact } from '../utils/redact.js';
 import { isRecord } from './expression.js';
 import {
@@ -90,17 +91,6 @@ export function snapshotPath(runId: string): string {
 /** The text a snapshot is written as: two-space JSON, one field per line, ending in a newline. */
 export function snapshotText(snapshot: RunSnapshot): string {
   return `${JSON.stringify(snapshot, null, 2)}\n`;
-}
-
-/** JSON with object keys sorted and undefined fields left out, so equal values give equal text. */
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(sorted(value));
-}
-
-function sorted(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sorted);
-  if (!isRecord(value)) return value;
-  return Object.fromEntries(Object.keys(value).sort().filter((key) => value[key] !== undefined).map((key) => [key, sorted(value[key])]));
 }
 
 /** Identifies the parsed definitions a run executes, whatever file layout produced them. */

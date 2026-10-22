@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { AgentObservationSchema } from '../agent-observation.js';
-import type { DriverIdentity, StepLease, TokenUsage, WorkflowFailure } from './types.js';
+import { DriverSchema } from '../driver-identity.js';
+import type { TokenUsage } from '../tool-launch/stdout.js';
+import type { StepLease, WorkflowFailure } from './types.js';
 import type { WorkspaceMode } from './workspace.js';
 
 const TokenUsageSchema: z.ZodType<TokenUsage> = z.object({
@@ -10,9 +12,6 @@ const TokenUsageSchema: z.ZodType<TokenUsage> = z.object({
 });
 
 const FailureSchema: z.ZodType<WorkflowFailure> = z.object({ code: z.string(), message: z.string() });
-
-/** Stored driver identity, with per-request capabilities omitted. */
-export const DriverSchema: z.ZodType<DriverIdentity> = z.object({ kind: z.string(), machine: z.string(), workspace: z.string() });
 
 const SessionRefSchema = z.object({ tool: z.string().min(1), id: z.string().min(1) });
 

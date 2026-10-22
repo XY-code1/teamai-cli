@@ -16,7 +16,10 @@ import { formatDiagnostic, parseWorkflow, promptFileDiagnostics, stepField } fro
 import type { WorkflowFiles } from './parse-context.js';
 import type { CachedWorkflow, WorkflowDefinition, WorkflowDiagnostic, WorkflowStep } from './types.js';
 import { assertSafePath, assertWithinRoot } from '../utils/path-safety.js';
-import { createGit, getHeadCommit } from '../utils/git.js';
+import { createGit } from '../utils/git.js';
+import {
+  remotelyReachableRevision, revisionHoldsSources, withoutStaleTeamRevision, type ReachableRevision,
+} from '../utils/team-revision.js';
 
 export interface SyncWorkflowOptions {
   dryRun?: boolean;
@@ -44,13 +47,6 @@ interface Candidate extends Version {
   sourceHash: string;
   teamRevision?: string;
 }
-
-interface ReachableRevision {
-  repositoryRoot: string;
-  revision: string;
-}
-
-const TEAM_REMOTE_REFS = 'refs/remotes/origin/';
 
 /** What a file runs after this sync, and why the versions it did not pick cannot run. */
 interface Settled {
@@ -120,59 +116,6 @@ async function workflowFileNames(dir: string): Promise<string[]> {
     return (await fs.readdir(dir)).filter((name) => name.endsWith('.yaml')).sort();
   } catch {
     return [];
-  }
-}
-
-async function isTeamRemoteRevision(root: string, revision: string): Promise<boolean> {
-  try {
-    const refs = await createGit(root).raw([
-      'for-each-ref', `--contains=${revision}`, '--format=%(refname)', TEAM_REMOTE_REFS,
-    ]);
-    return refs.trim() !== '';
-  } catch {
-    return false;
-  }
-}
-
-/** The checked-out commit, only when the team remote can reach it. */
-async function remotelyReachableRevision(root: string): Promise<ReachableRevision | undefined> {
-  try {
-    const revision = await getHeadCommit(root);
-    if (!revision || !await isTeamRemoteRevision(root, revision)) return undefined;
-    return {
-      repositoryRoot: await fs.realpath((await createGit(root).revparse(['--show-toplevel'])).trim()),
-      revision,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-async function withoutStaleTeamRevision(root: string, cached: CachedWorkflow | null): Promise<CachedWorkflow | null> {
-  if (!cached?.teamRevision || await isTeamRemoteRevision(root, cached.teamRevision)) return cached;
-  const next = { ...cached };
-  delete next.teamRevision;
-  return next;
-}
-
-/** Whether `revision` stores every source byte exactly as the cache read it. */
-async function revisionHoldsSources(
-  knowledgeRoot: string,
-  reachable: ReachableRevision | undefined,
-  sources: Array<{ path: string; content: string }>,
-): Promise<boolean> {
-  if (!reachable) return false;
-  const git = createGit(knowledgeRoot);
-  try {
-    for (const source of sources) {
-      const absolute = path.resolve(knowledgeRoot, source.path);
-      const relative = path.relative(reachable.repositoryRoot, await fs.realpath(absolute)).split(path.sep).join('/');
-      if (relative === '..' || relative.startsWith('../')) return false;
-      if (await git.show([`${reachable.revision}:${relative}`]) !== source.content) return false;
-    }
-    return true;
-  } catch {
-    return false;
   }
 }
 
