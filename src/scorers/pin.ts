@@ -8,6 +8,8 @@ import { parseScorer, type ScorerDefinition } from './definition.js';
 export const PinnedScorerSchema = z.object({
   sourceHash: z.string().min(1),
   teamRevision: z.string().optional(),
+  /** The file it was read from, such as `scorers/ops/<name>.md`; older runs have none. */
+  relativePath: z.string().optional(),
   content: z.string(),
 });
 export type PinnedScorer = z.infer<typeof PinnedScorerSchema>;

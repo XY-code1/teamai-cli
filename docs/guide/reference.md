@@ -59,6 +59,7 @@ sharing:
 
 scoring:
   batch: false               # true: a step's scorers share one judge call, unless the step or workflow says otherwise
+  isolation: best-effort      # verified: every judge of the team's scorers must be verified
 ```
 
 ### config.yaml (local config)
@@ -77,6 +78,8 @@ gitExcludeEnabled: true
 contributeHintEnabled: false
 usageReportEnabled: false
 codexTrustEnabled: false
+scoring:
+  isolation: verified          # this scope's judges must be verified; the strictest of team, scorer and this wins
 toolRoots:
   claude: ~/.claude-work
   codex: ~/.codex-alt

@@ -45,6 +45,20 @@ It replaces a root scorer of the same name. One name in two active namespaces is
 
 A workflow step lists the scorers that judge it, as `scorers: [review-quality]`. [Workflows](workflow.md) shows the full key.
 
+## Isolation
+
+```yaml
+# teamai.yaml
+scoring:
+  isolation: verified
+```
+
+The team's `scoring.isolation`, a scorer's `isolation`, and `scoring.isolation` in this scope's `config.yaml` may each ask for `verified`. The strictest wins; the default is `best-effort`. A value teamai does not know counts as `verified`, with a warning. `teamai score --next` leases work only to a driver whose `can.judge.isolation` meets it, and the local judge refuses a tool whose profile is below it. `teamai doctor` prints the level and what sets it:
+
+```text
+Scoring isolation: verified, set by teamai.yaml scoring.isolation.
+```
+
 ## Judge with any driver
 
 A run settles without waiting for its judge. Any driver then takes the judge work and answers for its own judge:

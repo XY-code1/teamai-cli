@@ -22,6 +22,8 @@ function teamRepo(files: Record<string, string>): LocalConfig {
   return { repo: { localPath: knowledge, remote: 'local' }, username: 'tester', scope: 'project', additionalRoles: [], projectRoot: root, dataHome: path.join(root, 'data') };
 }
 
+const SCORER = '---\nlabels:\n  - { value: good, score: 1, description: Good }\n  - { value: bad, score: 0, description: Bad }\npassingScore: 0.5\n---\nJudge.\n';
+
 describe('scorerNotes', () => {
   it('lists invalid scorer files and scorers a step lists that have no valid file, and writes no cache', async () => {
     const config = teamRepo({
@@ -41,7 +43,25 @@ describe('scorerNotes', () => {
     const inRepo = { ...config, dataHome: path.join(config.projectRoot ?? '', '.teamai') };
 
     expect(await scorerNotes(inRepo)).toEqual([expect.stringMatching(/^Scoring is off for this project: its teamai data is still in .*\.teamai, inside the repository.*Run teamai pull/)]);
-    expect(await scorerNotes(config)).toEqual([]);
+    expect(await scorerNotes(config)).toEqual(['Scoring isolation: best-effort, the default.']);
+  });
+
+  it.each([
+    ['scoring:\n  isolation: verified\n', {}, 'Scoring isolation: verified, set by teamai.yaml scoring.isolation.'],
+    ['scoring:\n  isolation: best-effort\n', { scoring: { isolation: 'verified' } }, 'Scoring isolation: verified, set by config.yaml scoring.isolation.'],
+    ['', { scoring: { isolation: 'strict' } },
+      'Scoring isolation: verified, set by config.yaml scoring.isolation. config.yaml scoring.isolation is "strict", which is not verified or best-effort, so it counts as verified.'],
+  ])('prints the isolation every judge needs and what sets it: %s %o', async (scoring, machine, line) => {
+    const config = { ...teamRepo({ 'scorers/q.md': SCORER, 'teamai.yaml': `team: t\nrepo: https://example.test/t.git\n${scoring}` }), ...machine };
+
+    expect(await scorerNotes(config)).toEqual([line]);
+  });
+
+  it('names each scorer file that asks for more isolation than the team and this machine', async () => {
+    const verified = SCORER.replace('passingScore: 0.5', 'passingScore: 0.5\nisolation: verified');
+    const config = teamRepo({ 'scorers/q.md': SCORER, 'scorers/ops/strict.md': verified, 'scorers/strict-too.md': verified });
+
+    expect(await scorerNotes(config)).toEqual(['Scoring isolation: best-effort, the default. scorers/ops/strict.md and scorers/strict-too.md ask for verified for their own work.']);
   });
 
   it('says nothing when every scorer is valid and known', async () => {

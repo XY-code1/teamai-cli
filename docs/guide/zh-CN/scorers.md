@@ -45,6 +45,20 @@ roles:
 
 工作流步骤用 `scorers: [review-quality]` 列出评判它的评分器。完整写法见[工作流](workflow.md)。
 
+## 隔离
+
+```yaml
+# teamai.yaml
+scoring:
+  isolation: verified
+```
+
+团队的 `scoring.isolation`、评分器的 `isolation`，以及本作用域 `config.yaml` 中的 `scoring.isolation` 都可以要求 `verified`。取最严格的一项；默认是 `best-effort`。teamai 不认识的值按 `verified` 处理，并给出警告。`teamai score --next` 只把工作租给 `can.judge.isolation` 满足要求的 driver，本机评判也拒绝配置级别低于要求的工具。`teamai doctor` 打印该级别及其来源：
+
+```text
+Scoring isolation: verified, set by teamai.yaml scoring.isolation.
+```
+
 ## 任意驱动评审
 
 运行结束时不等待评审。之后任意驱动都可以领取评审任务，并提交它自己的评审结果：

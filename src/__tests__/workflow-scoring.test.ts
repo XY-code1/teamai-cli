@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -286,6 +287,82 @@ console.log(JSON.stringify({ type: 'result', structured_output: { label: 'great'
     await settledRun(config);
     expect(data(await nextJudgeLease(config, request({ judge: { isolation: 'best-effort', tools: ['codex'] } })))).toEqual({ idle: { open: 1, leased: 0 } });
     expect(data(await nextJudgeLease(config, request()))).toHaveProperty('lease');
+  });
+
+  it('refuses a best-effort answer for a verified scorer and keeps the lease open', async () => {
+    const config = fixture(scorer(100, 'isolation: verified\n'));
+    await settledRun(config);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+    const answer = { driver: judgeDriver, outcome: 'success' as const, answer: { label: 'good', reasoning: 'r' } };
+
+    expect(await submitJudgeLease(config, lease.ref, { ...answer, judge: { isolation: 'best-effort' } })).toMatchObject({ error: { code: 'isolation_unmet' } });
+    expect(await LabelStore.local(config)).toEqual([]);
+    expect(data(await submitJudgeLease(config, lease.ref, answer))).toMatchObject({ label: { label: 'good' } });
+  });
+
+  it('names the file of a namespaced scorer that asks for a verified judge', async () => {
+    const config = fixture(scorer(100));
+    const scorers = path.join(config.repo.localPath, 'scorers');
+    fs.rmSync(path.join(scorers, 'quality.md'));
+    fs.mkdirSync(path.join(scorers, 'ops'));
+    fs.writeFileSync(path.join(scorers, 'ops', 'quality.md'), scorer(100, 'isolation: verified\n'));
+    await settledRun(config);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+
+    expect(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: { label: 'good', reasoning: 'r' }, judge: { isolation: 'best-effort' } }))
+      .toMatchObject({ error: { code: 'isolation_unmet', message: expect.stringContaining('scorers/ops/quality.md isolation asks for verified') } });
+  });
+
+  it('names the namespaced file once activation at one team revision selects it over an identical root scorer', async () => {
+    const config = fixture(scorer(100, 'isolation: verified\n'));
+    const knowledge = config.repo.localPath;
+    fs.mkdirSync(path.join(knowledge, 'scorers', 'ops'));
+    fs.writeFileSync(path.join(knowledge, 'scorers', 'ops', 'quality.md'), scorer(100, 'isolation: verified\n'));
+    fs.mkdirSync(path.join(knowledge, 'manifest'));
+    fs.writeFileSync(path.join(knowledge, 'manifest', 'roles.yaml'), 'version: 1\nroles:\n  - id: dev\n    resources: { knowledge: [], skills: [] }\n');
+    const origin = path.join(config.projectRoot ?? '', 'origin.git');
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: knowledge, encoding: 'utf8' }).trim();
+    execFileSync('git', ['init', '--bare', '-q', origin]);
+    git('init', '-q');
+    git('config', 'user.name', 'T');
+    git('config', 'user.email', 't@example.test');
+    git('add', '.');
+    git('commit', '-qm', 'one rubric in root and namespace');
+    git('remote', 'add', 'origin', origin);
+    git('push', '-qu', 'origin', 'HEAD');
+    const member: LocalConfig = { ...config, repo: { ...config.repo, kind: 'git', remote: origin } };
+    await syncWorkflowDefinitions({ ...member, primaryRole: 'dev' });
+    await settledRun(member);
+    const lease = leaseOf(await nextJudgeLease(member, request()));
+
+    expect(await submitJudgeLease(member, lease.ref, { driver: judgeDriver, outcome: 'success', answer: { label: 'good', reasoning: 'r' }, judge: { isolation: 'best-effort' } }))
+      .toMatchObject({ error: { code: 'isolation_unmet', message: expect.stringContaining('scorers/ops/quality.md isolation asks for verified') } });
+  });
+
+  it.each([
+    ['the team', 'verified', {}],
+    ['this machine', undefined, { scoring: { isolation: 'verified' } }],
+    ['an unknown value, counted as verified,', undefined, { scoring: { isolation: 'strict' } }],
+  ])('leases only to a verified judge when %s asks for it', async (_who, teamIsolation, machine) => {
+    const config = fixture(scorer(100), machine);
+    fs.writeFileSync(path.join(config.repo.localPath, 'teamai.yaml'), `team: t\nrepo: https://example.test/t.git\n${teamIsolation ? `scoring:\n  isolation: ${teamIsolation}\n` : ''}`);
+    await settledRun(config);
+    expect(data(await nextJudgeLease(config, request({ judge: { isolation: 'best-effort', tools: ['codex'] } })))).toEqual({ idle: { open: 1, leased: 0 } });
+    expect(data(await nextJudgeLease(config, request()))).toHaveProperty('lease');
+  });
+
+  it('refuses to judge locally with a tool below the isolation the team asks for', async () => {
+    const config = fixture(scorer(100));
+    fs.writeFileSync(path.join(config.repo.localPath, 'teamai.yaml'), 'team: t\nrepo: https://example.test/t.git\nscoring:\n  isolation: verified\n');
+    await settledRun(config);
+    const bin = path.join(config.projectRoot ?? '', 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('9.9.9 (Claude Code)'); process.exit(); }
+process.stdin.resume(); process.stdin.on('end', () => console.log(JSON.stringify({ type: 'result', structured_output: { label: 'good', reasoning: 'r' } })));\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+    expect(await runJudgeLease(config, lease.ref, { driver: judgeDriver })).toMatchObject({ error: { code: 'judge_tool_unavailable' } });
   });
 
   it('releases a lease its driver can no longer judge as leased, on hand-back and on renewal', async () => {

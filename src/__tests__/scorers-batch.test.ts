@@ -25,10 +25,16 @@ describe('team scoring.batch in teamai.yaml', () => {
   it.each([
     [{ batch: 'yes' }, {}],
     [3, undefined],
-    [{ batch: true, isolation: 'strict' }, { batch: true }],
   ])('drops an unreadable scoring %o instead of rejecting the whole file', (scoring, read) => {
     const parsed = TeamaiConfigSchema.safeParse({ ...team, scoring });
     expect(parsed.success).toBe(true);
     expect(parsed.data?.scoring).toEqual(read);
+  });
+
+  it.each([
+    [{ batch: true, isolation: 'strict' }, { batch: true, isolation: 'strict' }],
+    [{ isolation: 3 }, { isolation: '3' }],
+  ])('keeps scoring.isolation %o as text, so a value teamai does not know can count as verified', (scoring, read) => {
+    expect(TeamaiConfigSchema.parse({ ...team, scoring }).scoring).toEqual(read);
   });
 });

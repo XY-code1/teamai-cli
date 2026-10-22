@@ -25,6 +25,7 @@ import { loadModelAliases } from '../models/aliases.js';
 import { chooseJudgeModel } from '../scorers/judge-model.js';
 import { isSampled } from '../scorers/sampling.js';
 import { scoringUnavailable } from '../scorers/home.js';
+import { requiredIsolation, scopeIsolation, scorerIsolationSource, unknownIsolationText, type IsolationSetting } from '../scorers/isolation.js';
 import { answerSchema, evidenceDirOf, sweepEvidence } from '../scorers/evidence.js';
 import { buildEvidence } from './scoring-evidence.js';
 import { error, ok } from './engine.js';
@@ -171,6 +172,10 @@ async function entries(config: LocalConfig, now: string): Promise<ScoreEntry[]> 
   })));
 }
 
+function requiredFor(settings: readonly IsolationSetting[], { scorer, pin, definition }: Pick<ScoreEntry, 'scorer' | 'pin' | 'definition'>): Isolation {
+  return requiredIsolation([...settings, { source: scorerIsolationSource(scorer, pin.relativePath), value: definition.isolation }]).level;
+}
+
 /** Whether a judge at `offered` isolation may judge for a scorer that asks for `required`. */
 function meets(offered: Isolation, required: Isolation): boolean {
   return ISOLATIONS.indexOf(offered) >= ISOLATIONS.indexOf(required);
@@ -265,6 +270,8 @@ async function takeOneLease(config: LocalConfig, request: JudgeRequest, now: str
   }
   const found = await entries(config, now);
   const aliases = await loadModelAliases(config);
+  const isolation = await scopeIsolation(config);
+  for (const unknown of requiredIsolation(isolation).unknown) log.warn(`${unknownIsolationText(unknown)}.`);
   const skipped: SkippedEntry[] = [];
   const released = new Set<string>();
   const isOpen = (entry: ScoreEntry) => entry.state.kind === 'open' || released.has(entry.id);
@@ -286,7 +293,7 @@ async function takeOneLease(config: LocalConfig, request: JudgeRequest, now: str
     const back = mine[0];
     if (back) return { entry: back.entry, attempt: back.attempt, handedBack: true };
     for (const entry of found) {
-      if (!isOpen(entry) || !meets(request.judge.isolation, entry.definition.isolation ?? 'best-effort')) continue;
+      if (!isOpen(entry) || !meets(request.judge.isolation, requiredFor(isolation, entry))) continue;
       // Re-read under the lock: another driver may have taken it since the unlocked read.
       const fresh = entryState({ labels: [], attempts: await AttemptStore.ofEntry(config, entry.id), subjectChangedAt: entry.run.updatedAt, now });
       if (fresh.kind !== 'open') continue;
@@ -458,6 +465,11 @@ async function labelJudgeLease(config: LocalConfig, ref: string, submission: Ext
     if (tool !== attempt.judge.tool) {
       return error('invalid_json', `judge.tool must match the tool selected by the lease: ${attempt.judge.tool}.`);
     }
+    const isolation = local?.isolation ?? (submission.judge?.isolation === 'best-effort' ? 'best-effort' : attempt.judge.isolation);
+    const required = requiredIsolation([...await scopeIsolation(config), { source: scorerIsolationSource(attempt.scorer, pin.relativePath), value: definition.isolation }]);
+    if (!meets(isolation, required.level)) {
+      return error('isolation_unmet', `This answer comes from a ${isolation} judge, and ${required.setBy.join(' and ')} asks for ${required.level}. The lease stays open: judge it at ${required.level} isolation, then submit again.`);
+    }
     const usage = sumUsage(attempt.usage, submission.judge?.usage);
     const settled = { settledAt: now, ...(usage ? { usage } : {}) };
     const label: ScoreLabel = {
@@ -473,7 +485,7 @@ async function labelJudgeLease(config: LocalConfig, ref: string, submission: Ext
         tool,
         ...judgeIdentity(attempt, submission, local),
         ...(usage ? { usage } : {}),
-        isolation: local?.isolation ?? (submission.judge?.isolation === 'best-effort' ? 'best-effort' : attempt.judge.isolation),
+        isolation,
         access: local?.access ?? attempt.judge.access,
       },
       scoredAt: now,
@@ -564,7 +576,8 @@ export async function judgeLease(config: LocalConfig, ref: string, driver: Judge
   const evidence = evidenceDir(config, attempt.attempt);
   const built = await buildEvidence(run, attempt.subject, definition, evidence);
   if (!built.ok) return error(built.code, 'No recorded evidence could be read for this pass. Restore its commits or session, then retry.');
-  const result = await runLocalJudge({ tool: attempt.judge.tool, model: attempt.judge.model, evidence, schema: answerSchema(definition), isolation: definition.isolation });
+  const isolation = requiredFor(await scopeIsolation(config), { scorer: attempt.scorer, pin, definition });
+  const result = await runLocalJudge({ tool: attempt.judge.tool, model: attempt.judge.model, evidence, schema: answerSchema(definition), isolation });
   if (!result.ok || !definition.labels.some((label) => label.value === result.answer.label)) {
     await recordSpend(config, attempt, result.ok ? result.judge.usage : result.usage);
     const raw = result.ok ? JSON.stringify(result.answer) : result.raw;

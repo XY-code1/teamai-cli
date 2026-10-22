@@ -23,6 +23,8 @@ export interface SyncScorerResult {
   /** The names of the valid scorers, which steps may list. */
   cached: string[];
   invalid: ScorerDiagnostic[];
+  /** The files of the valid scorers that ask for a `verified` judge, sorted. */
+  verified: string[];
 }
 
 /** The cache stores the file's text and parses it again on load, so a cached definition is always one this teamai reads. */
@@ -80,7 +82,7 @@ export async function pinScorers(config: LocalConfig, names: Iterable<string>): 
   for (const name of new Set(names)) {
     const entry = await readCache(config, name);
     if (!entry || !(await loadCachedScorer(config, name))) continue;
-    pins[name] = { sourceHash: entry.sourceHash, ...(entry.teamRevision ? { teamRevision: entry.teamRevision } : {}), content: entry.content };
+    pins[name] = { sourceHash: entry.sourceHash, ...(entry.teamRevision ? { teamRevision: entry.teamRevision } : {}), relativePath: entry.relativePath, content: entry.content };
   }
   return pins;
 }
@@ -159,7 +161,7 @@ async function dropUnsettled(config: LocalConfig, settled: Set<string>): Promise
 export async function syncScorerDefinitions(config: LocalConfig, options: SyncScorerOptions = {}): Promise<SyncScorerResult> {
   const knowledgeRoot = getKnowledgeDir(config);
   const { candidates, invalid } = await scorerCandidates(path.join(knowledgeRoot, 'scorers'));
-  const result: SyncScorerResult = { cached: [], invalid };
+  const result: SyncScorerResult = { cached: [], invalid, verified: [] };
   const active = options.everyNamespace ? namespacesOf(candidates) : await activeScorerNamespaces(config, candidates);
   const files: Array<{ relativePath: string; full: string }> = [];
   const byName = new Map<string, NamespaceCandidate<string>[]>();
@@ -191,6 +193,7 @@ export async function syncScorerDefinitions(config: LocalConfig, options: SyncSc
       continue;
     }
     const { name } = parsed.definition;
+    if (parsed.definition.isolation === 'verified') result.verified.push(relativePath);
     const sourceHash = createHash('sha256').update(content).digest('hex');
     const revision = await (reachable ??= remotelyReachableRevision(knowledgeRoot));
     const holds = await revisionHoldsSources(knowledgeRoot, revision, [{ path: relativePath, content }]);
@@ -210,6 +213,7 @@ export async function syncScorerDefinitions(config: LocalConfig, options: SyncSc
   }
   if (!options.dryRun) await dropUnsettled(config, new Set(result.cached));
   result.invalid.sort((left, right) => (left.file < right.file ? -1 : left.file > right.file ? 1 : 0));
+  result.verified.sort();
 
   for (const diagnostic of result.invalid) log.warn(`[scorers] ${formatScorerDiagnostic(diagnostic)}`);
   const scope = options.scopeLabel ?? config.scope;

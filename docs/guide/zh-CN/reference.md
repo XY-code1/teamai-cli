@@ -59,6 +59,7 @@ sharing:
 
 scoring:
   batch: false               # true：步骤的评分器共用一次评审调用，除非步骤或工作流另有设置
+  isolation: best-effort      # verified：团队评分器的所有评审都必须是 verified
 ```
 
 ### config.yaml（本地配置）
@@ -77,6 +78,8 @@ gitExcludeEnabled: true
 contributeHintEnabled: false
 usageReportEnabled: false
 codexTrustEnabled: false
+scoring:
+  isolation: verified          # 本作用域的评审必须是 verified；团队、评分器与此处取最严格的一项
 toolRoots:
   claude: ~/.claude-work
   codex: ~/.codex-alt
