@@ -634,7 +634,7 @@ steps:
 
     const result = await syncWorkflowDefinitions(config);
 
-    expect(result).toEqual({ cached: [], kept: [], invalid: [], unrunnable: [] });
+    expect(result).toEqual({ cached: [], kept: [], invalid: [], unrunnable: [], scorers: { cached: [], invalid: [] } });
     expect(await startRun(config, 'build')).toMatchObject({ error: { code: 'workflow_not_found' } });
   });
 

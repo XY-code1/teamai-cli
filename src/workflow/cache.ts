@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { syncScorerDefinitions, type SyncScorerOptions, type SyncScorerResult } from '../scorers/cache.js';
 import { log } from '../utils/logger.js';
 import { readFileSafe, remove, writeJsonAtomic } from '../utils/fs.js';
 import {
@@ -21,16 +22,15 @@ import {
   remotelyReachableRevision, revisionHoldsSources, withoutStaleTeamRevision, type ReachableRevision,
 } from '../utils/team-revision.js';
 
-export interface SyncWorkflowOptions {
-  dryRun?: boolean;
-  scopeLabel?: string;
-}
+export type SyncWorkflowOptions = SyncScorerOptions;
 
 export interface SyncWorkflowResult {
   cached: string[];
   kept: string[];
   invalid: WorkflowDiagnostic[];
   unrunnable: string[];
+  /** The scorers of the same tree, synced first. */
+  scorers: SyncScorerResult;
 }
 
 /** One version of a file, as its reference checks read it: this revision, or the copy the cache keeps. */
@@ -120,7 +120,7 @@ async function workflowFileNames(dir: string): Promise<string[]> {
 }
 
 /**
- * Validate each `workflows/*.yaml` on its own and cache only files that pass.
+ * Validate `scorers/` first, then each `workflows/*.yaml` on its own, and cache only files that pass.
  * An invalid file keeps its last cached definition; a file that was never valid
  * stays unrunnable. The cache then holds only what this sync settled, so start
  * finds no version that was not checked against the others. Nothing here fails the caller.
@@ -129,7 +129,8 @@ export async function syncWorkflowDefinitions(
   config: LocalConfig,
   options: SyncWorkflowOptions = {},
 ): Promise<SyncWorkflowResult> {
-  const result: SyncWorkflowResult = { cached: [], kept: [], invalid: [], unrunnable: [] };
+  const scorers = await syncScorerDefinitions(config, options);
+  const result: SyncWorkflowResult = { cached: [], kept: [], invalid: [], unrunnable: [], scorers };
   const dir = path.join(getKnowledgeDir(config), 'workflows');
   const knowledgeRoot = getKnowledgeDir(config);
   // Asked on the first valid file: a team without workflows starts no git here.

@@ -102,6 +102,21 @@ const MISSING_PROMPT = [
   '    prompt_file: prompts/release.md',
 ].join('\n');
 
+const VALID_SCORER = [
+  '---',
+  'labels:',
+  '  - { value: good, score: 1, description: Good. }',
+  '  - { value: bad, score: 0, description: Bad. }',
+  'passingScore: 1',
+  '---',
+  'Judge the change.',
+  '',
+].join('\n');
+
+async function writeScorer(repoDir: string, file: string, body: string): Promise<void> {
+  await fse.outputFile(path.join(repoDir, 'scorers', file), body);
+}
+
 function runsWorkflow(name: string, child: string): string {
   return `schemaVersion: v1alpha1
 name: ${name}
@@ -320,7 +335,7 @@ describe('reviewBranchDir — read-only health checks for a pushed branch (#776)
     expect(Array.isArray(parsed.findings)).toBe(true);
     for (const finding of parsed.findings) {
       expect(['fail', 'warn', 'info']).toContain(finding.level);
-      expect(['structure', 'naming', 'duplicates', 'format', 'leaks', 'workflows']).toContain(finding.check);
+      expect(['structure', 'naming', 'duplicates', 'format', 'leaks', 'workflows', 'scorers']).toContain(finding.check);
       expect(typeof finding.message).toBe('string');
     }
   });
@@ -393,6 +408,75 @@ describe('reviewBranchDir — read-only health checks for a pushed branch (#776)
   });
 });
 
+describe('reviewBranchDir — scorers', () => {
+  let repoDir: string;
+
+  beforeEach(async () => {
+    repoDir = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-review-scorers-'));
+  });
+
+  afterEach(async () => {
+    await fse.remove(repoDir);
+  });
+
+  it('passes a valid scorer and ignores scorers/README.md', async () => {
+    await writeScorer(repoDir, 'quality.md', VALID_SCORER);
+    await writeScorer(repoDir, 'README.md', '# Our scorers\n');
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.findings).toEqual([]);
+    expect(review.ok).toBe(true);
+  });
+
+  it('fails a malformed scorer and a file that is not a scorer', async () => {
+    await writeScorer(repoDir, 'quality.md', VALID_SCORER.replace('passingScore: 1', 'passingScore: high'));
+    await writeScorer(repoDir, 'eval.yaml', 'name: eval\n');
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.ok).toBe(false);
+    expect(review.findings).toEqual([
+      {
+        level: 'fail',
+        check: 'scorers',
+        path: 'scorers/eval.yaml',
+        message: 'scorers/eval.yaml: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers and an optional README.md',
+      },
+      {
+        level: 'fail',
+        check: 'scorers',
+        path: 'scorers/quality.md',
+        message: 'scorers/quality.md: passingScore must be a number',
+      },
+    ]);
+  });
+
+  it('fails a malformed namespaced scorer of a team with a projects manifest', async () => {
+    await fse.outputFile(path.join(repoDir, 'manifest', 'projects.yaml'), 'version: 1\nprojects:\n  - id: svc-a\n    name: Svc A\n    resources: { skills: [] }\n');
+    await writeScorer(repoDir, 'svc-a/quality.md', VALID_SCORER.replace('passingScore: 1', 'passingScore: high'));
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.findings).toEqual([
+      { level: 'fail', check: 'scorers', path: 'scorers/svc-a/quality.md', message: 'scorers/svc-a/quality.md: passingScore must be a number' },
+    ]);
+  });
+
+  it('fails a scorer whose text carries a credential, as it fails a rule', async () => {
+    await writeScorer(repoDir, 'quality.md', VALID_SCORER.replace('Judge the change.', 'Call the API with sk-abcdefghijklmnopqrstuvwx0123456789.'));
+    await writeScorer(repoDir, 'README.md', 'Ask at http://10.12.0.7:8080 before adding one.\n');
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.ok).toBe(false);
+    expect(review.findings.map(({ check, path: file, message }) => ({ check, file, message: message.split(' (')[0] })).sort((a, b) => String(a.file).localeCompare(String(b.file)))).toEqual([
+      { check: 'leaks', file: 'scorers/quality.md', message: 'scorers/quality.md looks like it carries a credential' },
+      { check: 'leaks', file: 'scorers/README.md', message: 'scorers/README.md contains an internal address' },
+    ]);
+  });
+});
+
 describe('materializeRef — branch materialization from git', () => {
   it('extracts workflows, prompts, scorers, and standard roots from git rev', async () => {
     const gitRepo = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-git-repo-'));
@@ -403,7 +487,7 @@ describe('materializeRef — branch materialization from git', () => {
       execFileSync('git', ['-C', gitRepo, 'config', 'user.email', 'test@example.com']);
       await fse.outputFile(path.join(gitRepo, 'workflows', 'deploy.yaml'), 'name: deploy\n');
       await fse.outputFile(path.join(gitRepo, 'prompts', 'release.md'), '# prompt\n');
-      await fse.outputFile(path.join(gitRepo, 'scorers', 'eval.yaml'), 'name: eval\n');
+      await fse.outputFile(path.join(gitRepo, 'scorers', 'eval.md'), '---\npassingScore: 1\n---\nJudge.\n');
       await fse.outputFile(path.join(gitRepo, 'ignored', 'file.txt'), 'ignore me\n');
       execFileSync('git', ['-C', gitRepo, 'add', '.']);
       execFileSync('git', ['-C', gitRepo, 'commit', '-q', '-m', 'initial']);
@@ -412,7 +496,7 @@ describe('materializeRef — branch materialization from git', () => {
       expect(count).toBe(3);
       expect(await fse.pathExists(path.join(destDir, 'workflows', 'deploy.yaml'))).toBe(true);
       expect(await fse.pathExists(path.join(destDir, 'prompts', 'release.md'))).toBe(true);
-      expect(await fse.pathExists(path.join(destDir, 'scorers', 'eval.yaml'))).toBe(true);
+      expect(await fse.pathExists(path.join(destDir, 'scorers', 'eval.md'))).toBe(true);
       expect(await fse.pathExists(path.join(destDir, 'ignored', 'file.txt'))).toBe(false);
     } finally {
       await fse.remove(gitRepo);

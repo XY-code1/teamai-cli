@@ -202,16 +202,17 @@ describe('#1083 workflow run records', () => {
   });
 
   it('publishes the failure code of every step failure teamai writes, and only codes it can name', () => {
-    // Codes a `code: '…'` literal in src/workflow writes that never become a run's failure.
+    // Codes a `code: '…'` literal in src/workflow or src/scorers writes that never become a run's failure.
     const diagnostics = ['unknown_key', 'missing_needs', 'false_if', 'bad_template', 'dotted_name', 'undeclared_output', 'undeclared_end', 'bad_loop', 'bad_workspace'] satisfies Array<WorkflowDiagnostic['code']>;
     const answers = ['invalid_json', 'driver_running', 'invalid_run', 'repeated_response', 'agent_in_path', 'stale_response', 'retried', 'end_reached', 'repeated_report', 'wrong_attempt', 'invalid_report', 'lease_cancelled', 'interrupted', 'run_unreadable', 'driver_stuck', 'busy', 'workflow_recursion', 'workflow_not_found',
       // Refusals of a run handover, answered to the command or driver that asked for it.
       'not_owner', 'unsupported_repo', 'reports_unreachable', 'reports_failed', 'run_not_found', 'run_not_published', 'run_mismatch',
       'state_conflict', 'state_moved', 'definition_mismatch', 'records_pending', 'snapshot_unsupported', 'secret_detected', 'local_path_detected', 'origin_unavailable', 'commit_missing',
       'branch_diverged', 'sessions_not_archived'];
-    const source = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'workflow');
-    const written = new Set(fs.readdirSync(source).filter((file) => file.endsWith('.ts'))
-      .flatMap((file) => [...fs.readFileSync(path.join(source, file), 'utf8').matchAll(/code: '([^']+)'/g)].map((match) => match[1]!)));
+    const sources = ['workflow', 'scorers'].map((dir) => path.join(path.dirname(fileURLToPath(import.meta.url)), '..', dir));
+    const written = new Set(sources.flatMap((source) => fs.readdirSync(source, { recursive: true, encoding: 'utf8' })
+      .filter((file) => file.endsWith('.ts'))
+      .flatMap((file) => [...fs.readFileSync(path.join(source, file), 'utf8').matchAll(/code: '([^']+)'/g)].flatMap((match) => match[1] ?? []))));
     const failedWith = (code: string): RunState => runState({
       status: 'failed',
       steps: [{ id: 'one', status: 'failed', outcome: 'failed', attempt: 'a1', settledAt: 2, failure: { code, message: 'm' } }],
