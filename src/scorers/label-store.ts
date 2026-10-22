@@ -24,9 +24,12 @@ export function reasoningPath(config: LocalConfig, id: string): string {
   return path.join(scoresDir(config), 'reasoning', `${id}.md`);
 }
 
-/** What a member can do with a label that did not pass: turn its reasoning into a learning for the team. */
-export function shareFailedLabelHint(reasoningFile: string): string {
-  return `To share what went wrong, ask your agent to read ${reasoningFile} and share it with the team (teamai contribute).`;
+/**
+ * What a member can do with a label that did not pass: turn its reasoning into a learning for the team, marking the
+ * scored session as contributed when there is one.
+ */
+export function shareFailedLabelHint(reasoningFile: string, sessionId?: string): string {
+  return `To share what went wrong, ask your agent to read ${reasoningFile} and share it with the team (teamai contribute${sessionId ? ` --session-id ${sessionId}` : ''}).`;
 }
 
 /** Where a label is published: the member's file for the UTC month it was scored in. */
@@ -34,13 +37,14 @@ function publishedPath(username: string, label: ScoreLabel): string {
   return `scores/${username}/${label.scoredAt.slice(0, 7)}.jsonl`;
 }
 
-function reasoningText(label: ScoreLabel, reasoning: string): string {
+function reasoningText(label: ScoreLabel, reasoning: string, prompt: string | undefined): string {
   return [
     `scorer: ${label.scorer}`,
     `rubric.sourceHash: ${label.rubric.sourceHash}`,
     `subject: ${JSON.stringify(label.subject)}`,
     `label: ${label.label}`,
     `scoredAt: ${label.scoredAt}`,
+    ...(prompt === undefined ? [] : [`prompt: ${prompt}`]),
     '',
     reasoning,
     '',
@@ -83,11 +87,12 @@ export const LabelStore = {
   /**
    * The outbox entry commits the label: a failure before it records no label, and one after it leaves a label that
    * `local` reads and `publish` still sends. Returns the label's `id` and the `version` that names its reasoning file.
+   * `prompt`, the redacted first prompt of a judged session, heads the reasoning file so a member finds it with grep.
    */
-  async append(config: LocalConfig, label: ScoreLabel, reasoning: string): Promise<{ id: string; version: string }> {
+  async append(config: LocalConfig, label: ScoreLabel, reasoning: string, prompt?: string): Promise<{ id: string; version: string }> {
     const id = labelId(label);
     const version = labelVersion(label);
-    await writeFileAtomic(reasoningPath(config, version), reasoningText(label, reasoning));
+    await writeFileAtomic(reasoningPath(config, version), reasoningText(label, reasoning, prompt));
     await writeJsonAtomic(path.join(pendingDir(config), `${id}.json`), label);
     await fs.appendFile(labelsFile(config), `${JSON.stringify(label)}\n`, 'utf8');
     return { id, version };

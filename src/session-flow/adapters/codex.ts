@@ -44,7 +44,7 @@ import { z } from 'zod';
 import { AgentAdapter, type SessionMeta, type SessionReadRef, type Subagent, type SubagentsRead } from './base.js';
 import type { Session, Message, ContentBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock } from '../ir.js';
 import { imagePlaceholderText } from '../ir.js';
-import { titleFromUserText, visibleUserText } from '../title.js';
+import { typedTitle, visibleUserText } from '../title.js';
 import { assertSafeSessionFileId, deriveTargetSessionId } from '../ids.js';
 import { findSqlite3 } from '../sqlite.js';
 import { log } from '../../utils/logger.js';
@@ -351,10 +351,10 @@ export class CodexAdapter extends AgentAdapter {
     return name;
   }
 
-  async listConversations(projectPath?: string): Promise<SessionMeta[]> {
+  async listConversations(projectPath?: string, { archived = false }: { archived?: boolean } = {}): Promise<SessionMeta[]> {
     const metas: SessionMeta[] = [];
 
-    for (const f of this.scanJsonlFiles()) {
+    for (const f of archived ? this.scanAllRollouts() : this.scanJsonlFiles()) {
       const first = this.readFirstLine(f);
       if (!first || first.type !== 'session_meta') continue;
 
@@ -409,7 +409,7 @@ export class CodexAdapter extends AgentAdapter {
             text = (content ?? []).map((c) => String(c.text ?? '')).join(' ');
           }
           if (!text) continue;
-          const cleaned = titleFromUserText(visibleUserText(text));
+          const cleaned = typedTitle(text);
           if (cleaned) contentTitle = cleaned;
         }
       } catch {
@@ -490,7 +490,7 @@ export class CodexAdapter extends AgentAdapter {
           text = (content ?? []).map((c) => String(c.text ?? '')).join(' ');
         }
         if (!text) continue;
-        const cleaned = titleFromUserText(visibleUserText(text));
+        const cleaned = typedTitle(text);
         if (cleaned) {
           readTitle = cleaned;
           break;

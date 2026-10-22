@@ -203,7 +203,7 @@ describe('#1083 workflow run records', () => {
   });
 
   it('publishes the failure code of every step failure teamai writes, and only codes it can name', () => {
-    // Codes src/workflow, src/scorers or teamai score writes, as `code: '…'`, `error('…', …)` or `failure('…', …)`, that never become a run's failure.
+    // Codes a module writes, as `code: '…'`, `error('…', …)` or `failure('…', …)`, that never become a run's failure: every module of src/workflow and src/scorers, and every other one that imports src/scorers or answers a WorkflowEnvelope.
     const diagnostics = ['unknown_key', 'missing_needs', 'false_if', 'bad_template', 'dotted_name', 'undeclared_output', 'undeclared_end', 'bad_loop', 'bad_workspace'] satisfies Array<WorkflowDiagnostic['code']>;
     const answers = ['invalid_json', 'driver_running', 'invalid_run', 'repeated_response', 'agent_in_path', 'stale_response', 'retried', 'end_reached', 'repeated_report', 'wrong_attempt', 'invalid_report', 'lease_cancelled', 'interrupted', 'run_unreadable', 'driver_stuck', 'busy', 'workflow_recursion', 'workflow_not_found',
       // Refusals of a run handover, answered to the command or driver that asked for it.
@@ -216,25 +216,26 @@ describe('#1083 workflow run records', () => {
       'lease_unknown', 'lease_settled', 'entry_closed', 'label_invalid', 'isolation_unmet',
       // Work the driver's judge tools cannot run the scorer's model for; it stays open for another driver.
       'judge_model_unavailable',
-      // Refusals of a teamai score command line before it reads any judge work.
-      'invalid_arguments', 'invalid_pass', 'not_initialized',
+      // Refusals of a teamai score or teamai workflow command line before it reads any run or judge work.
+      'invalid_arguments', 'invalid_pass', 'not_initialized', 'unsupported_driver', 'invalid_tools',
       // Refusals of teamai score --run, answered to the member who asked for a pass to be judged.
       'scoring_unavailable', 'pass_not_found', 'scorer_not_found', 'entry_leased',
+      // Refusals of teamai score --session, answered to the member who asked for a session to be judged.
+      'session_required', 'source_required', 'session_not_found', 'session_ambiguous',
       // Why a judge attempt closed: kept with the attempt under scores/, never on a run.
       ...JUDGE_FAILURES];
     const src = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-    const files = [
-      ...['workflow', 'scorers'].flatMap((dir) => fs.readdirSync(path.join(src, dir), { recursive: true, encoding: 'utf8' })
-        .filter((file) => file.endsWith('.ts')).map((file) => path.join(dir, file))),
-      'score-commands.ts',
-    ].map((file) => ({ file, text: fs.readFileSync(path.join(src, file), 'utf8') }));
+    const files = fs.readdirSync(src, { recursive: true, encoding: 'utf8' })
+      .filter((file) => file.endsWith('.ts') && !file.startsWith('__tests__'))
+      .map((file) => ({ file, text: fs.readFileSync(path.join(src, file), 'utf8') }))
+      .filter(({ file, text }) => /^(workflow|scorers)\//.test(file) || /from '(?:\.\.?\/)+scorers\//.test(text) || /\bWorkflowEnvelope\b/.test(text));
     const written = new Set(files.flatMap(({ text }) => [
       ...[...text.matchAll(/\bcode: ('[^']+'(?:\s*\|\s*'[^']+')*)/g)].flatMap((match) => [...(match[1] ?? '').matchAll(/'([^']+)'/g)].flatMap((code) => code[1] ?? [])),
-      ...[...text.matchAll(/(?<!function )\b(?:error|failure)\('([^']+)'/g)].flatMap((match) => match[1] ?? []),
+      ...[...text.matchAll(/(?<![.\w]|function )(?:error|failure)\('([^']+)'/g)].flatMap((match) => match[1] ?? []),
     ]));
     // An `error(…)` whose code is not a literal passes on a code written as a literal elsewhere; each one is named here.
-    const passedOn = ['workflow/engine.ts: tree.failed.code', 'workflow/scoring.ts: built.code', 'workflow/scoring.ts: result.code'];
-    const unnamed = files.flatMap(({ file, text }) => [...text.matchAll(/(?<!function )\b(?:error|failure)\((?!')([^,)]+)/g)].map((match) => `${file}: ${match[1]}`));
+    const passedOn = ['session-flow/scoring.ts: result.code', 'workflow/engine.ts: tree.failed.code', 'workflow/scoring.ts: built.code', 'workflow/scoring.ts: result.code'];
+    const unnamed = files.flatMap(({ file, text }) => [...text.matchAll(/(?<![.\w]|function )(?:error|failure)\((?!')([^,)]+)/g)].map((match) => `${file}: ${match[1]}`)).sort();
     const failedWith = (code: string): RunState => runState({
       status: 'failed',
       steps: [{ id: 'one', status: 'failed', outcome: 'failed', attempt: 'a1', settledAt: 2, failure: { code, message: 'm' } }],

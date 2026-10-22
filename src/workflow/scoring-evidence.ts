@@ -3,13 +3,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { AgentSession } from '../session-flow/agent-session.js';
-import type { Session } from '../session-flow/ir.js';
+import { judgedTranscript } from '../session-flow/scoring.js';
 import { collectTeamSecrets } from '../env-resolution.js';
 import type { LocalConfig } from '../types.js';
 import { collectEnvSecrets, redact } from '../utils/redact.js';
 import {
-  fencedEvidence, isEvidenceReady, keepEnds, rubricPrompt, writeEvidence,
-  SESSION_MAX_CHARS, SUBAGENT_MAX_CHARS, TOOL_CALL_MAX_CHARS, type EvidenceGap, type Rubrics,
+  fencedEvidence, isEvidenceReady, rubricPrompt, writeEvidence, SESSION_MAX_CHARS, SUBAGENT_MAX_CHARS, type EvidenceGap, type Rubrics,
 } from '../scorers/evidence.js';
 import type { RunSubject } from '../scorers/label.js';
 import { firstSettled, isUnder, passRange, passesWithin, runPasses } from './loop.js';
@@ -54,15 +53,6 @@ export function evidencePlan(run: RunState, subject: RunSubject) {
   if (diff?.source === 'copy') ranges.unshift({ step: subject.step, pass: subject.pass, ...diff });
   if (!diff && ranges.length === 0) gaps.push('no_recorded_range');
   return { subject, kind: workflow ? 'workflow' : 'prompt', checkout: run.checkout, diff, repoAt: diff?.to ?? ranges.at(-1)?.to, passes, ranges, gaps };
-}
-
-function transcript(session: Session, budget: number): string {
-  const capped: Session = {
-    ...session,
-    messages: session.messages.map((message) => ({ ...message, content: message.content.map((block) =>
-      block.type === 'tool_call' ? { ...block, arguments: { excerpt: keepEnds(JSON.stringify(block.arguments), TOOL_CALL_MAX_CHARS) } } : block) })),
-  };
-  return keepEnds(AgentSession.transcript(capped).map((entry) => `### ${entry.role}\n${entry.text}\n${entry.toolOutput}`).join('\n\n'), budget);
 }
 
 async function git(checkout: string, args: string[]): Promise<string> {
@@ -144,14 +134,10 @@ export async function buildEvidence(config: LocalConfig, run: RunState, subject:
       const found = await AgentSession.find({ platform, sessionId: pass.session, cwd: ranIn(run, pass) }, { subagents: true });
       if (found.status !== 'done') { gaps.add('transcript_not_found'); continue; }
       content = true;
-      let body = transcript(found.session, SESSION_MAX_CHARS);
-      if (found.subagents?.status !== 'read') gaps.add('subagents_unread');
-      else for (const agent of found.subagents.agents) {
-        if (agent.start === 'unknown') gaps.add('subagent_boundary_unknown');
-        body += `\n\n## Subagent (depth ${agent.depth}${agent.finished === false ? ', not finished' : ''})\n\n${transcript(agent.session, SUBAGENT_MAX_CHARS)}`;
-      }
+      const judged = judgedTranscript(found, { session: SESSION_MAX_CHARS, subagent: SUBAGENT_MAX_CHARS });
+      for (const gap of judged.gaps) gaps.add(gap);
       await fs.mkdir(path.join(tmp, 'transcripts'), { recursive: true });
-      body = mask(body);
+      const body = mask(judged.body);
       await fs.writeFile(path.join(tmp, 'transcripts', `${name}.md`), body);
       sections.push({ title: `transcripts/${name}.md`, body });
     }
@@ -164,7 +150,7 @@ export async function buildEvidence(config: LocalConfig, run: RunState, subject:
     await fs.writeFile(path.join(tmp, 'evidence.json'), JSON.stringify(manifest, null, 2));
     sections.unshift({ title: 'evidence.json', body: JSON.stringify(manifest) });
     sections.push({ title: 'outputs.json', body: outputText });
-    await fs.writeFile(path.join(tmp, 'prompt.md'), mask(rubricPrompt(rubrics)) + fencedEvidence(sections));
+    await fs.writeFile(path.join(tmp, 'prompt.md'), mask(rubricPrompt(rubrics)) + fencedEvidence(sections, 'diff.patch, repo/, transcripts/, outputs.json and evidence.json'));
   });
   return content ? { ok: true } : { ok: false, code: 'evidence_empty' };
 }

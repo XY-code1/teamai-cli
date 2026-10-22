@@ -19,16 +19,16 @@ export function scorerModelUnavailableText(scorer: string, asked: string, cause:
 /** CodeBuddy's judge launch passes no effort, so its judges run without an alias's. */
 const NO_EFFORT: ReadonlySet<string> = new Set(['codebuddy']);
 
-export type JudgeModelChoice =
+export type JudgeModelChoice<Tool extends string = string> =
   /** `note` says why the tool default judges in place of the scorer's alias. */
-  | { ok: true; choice: Pick<LeasedAttempt['judge'], 'tool' | 'model' | 'by' | 'noModel' | 'alias'>; note?: string }
+  | { ok: true; choice: Pick<LeasedAttempt['judge'], 'model' | 'by' | 'noModel' | 'alias'> & { tool: Tool }; note?: string }
   | { ok: false; code: 'judge_model_unavailable'; reason: keyof typeof NO_MODEL_FIX; message: string };
 
 /**
  * The first of `tools` that gives the scorer's `model` a model, or that the member's `~` entry or a model switch sends
  * to its own default. An alias no tool maps, or that cannot be resolved, is unavailable.
  */
-export function chooseJudgeModel(aliases: ModelAliases, scorer: Pick<ScorerDefinition, 'name' | 'model'>, tools: readonly string[]): JudgeModelChoice {
+export function chooseJudgeModel<Tool extends string>(aliases: ModelAliases, scorer: Pick<ScorerDefinition, 'name' | 'model'>, tools: readonly Tool[]): JudgeModelChoice<Tool> {
   const { model } = scorer;
   const isAlias = model !== undefined && isModelAlias(aliases, model);
   const asked = isAlias ? `model alias "${model}"` : `model "${model}"`;

@@ -88,8 +88,8 @@ export abstract class AgentAdapter {
 
   abstract get platform(): string;
 
-  /** List every session under the given project (working directory) on this platform. When projectPath is undefined, list all. */
-  abstract listConversations(projectPath?: string): Promise<SessionMeta[]>;
+  /** List every session under the given project (working directory) on this platform. When projectPath is undefined, list all. `archived` adds the sessions the platform archived. */
+  abstract listConversations(projectPath?: string, options?: { archived?: boolean }): Promise<SessionMeta[]>;
 
   /**
    * Read one session and return a normalized IR Session. Lookup order: `filePath`, then the id in

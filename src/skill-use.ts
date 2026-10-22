@@ -17,6 +17,8 @@ import path from 'node:path';
 import { z } from 'zod';
 import { sanitizeSessionId } from './contribute-check.js';
 import { resolveMemberToolRoots } from './config.js';
+import type { ContentBlock, Message } from './session-flow/ir.js';
+import { typedText } from './session-flow/title.js';
 import { isToolId, TOOLS, type SkillLoad } from './tools.js';
 import { SKILL_NAME_CHARS, type LocalConfig } from './types.js';
 import { withFileLock } from './update.js';
@@ -118,6 +120,11 @@ function promptCandidates(prompt: string, tool: string): Candidate[] {
     }
   }
   return [...prompt.matchAll(pattern)].map((match) => ({ skill: match[1] }));
+}
+
+/** What the member typed in a block of a session message, or '' when the block holds none. */
+export function typedIn(message: Message, block: ContentBlock): string {
+  return block.type === 'text' && message.role === 'user' && !message.metadata?.isMeta ? typedText(block.text) : '';
 }
 
 /** The candidates that name an installed skill, each once. */
