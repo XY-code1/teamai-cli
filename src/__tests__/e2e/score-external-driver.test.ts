@@ -1,7 +1,8 @@
 /**
  * Real CLI against a local bare team repo: an external JSON driver runs a scored workflow to its end with workflow next
  * and report, then takes the judge work with score --next and settles it with score --lease --submit for a fake judge.
- * The member then asks for the pass again with score --run --queue.
+ * The member then asks for the pass again with score --run --queue. The review's report names the team skills it used,
+ * and the label carries those that are shaped like a skill name.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -116,9 +117,10 @@ describe('teamai score with an external driver', () => {
       expect(next.data, JSON.stringify(next)).toBeDefined();
       expect(JSON.stringify(next)).not.toContain('judge');
       done = next.data?.done;
-      const lease = z.object({ attempt: z.string(), revision: z.number() }).optional().parse(next.data?.lease);
+      const lease = z.object({ attempt: z.string(), revision: z.number(), step: z.string() }).optional().parse(next.data?.lease);
       if (!lease) continue;
-      const reported = envelope((await runCLI(['workflow', 'report', runId, '--json', JSON.stringify({ attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver, outputs: { reviewed: true } })], app, env)).stdout);
+      const used = lease.step === 'review' ? { used: { skills: ['review-notes', path.join(home, '.claude', 'skills', 'deploy-notes', 'SKILL.md')] } } : {};
+      const reported = envelope((await runCLI(['workflow', 'report', runId, '--json', JSON.stringify({ attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver, outputs: { reviewed: true }, ...used })], app, env)).stdout);
       expect(reported.data, JSON.stringify(reported)).toMatchObject({ accepted: true });
     }
     expect(done).toMatchObject({ outcome: 'succeeded' });
@@ -144,7 +146,7 @@ describe('teamai score with an external driver', () => {
     const dataHome = path.resolve(lease.evidence, '..', '..', '..');
     const labels = fs.readFileSync(path.join(dataHome, 'scores', 'labels.jsonl'), 'utf8').trim().split('\n');
     expect(labels).toHaveLength(1);
-    expect(JSON.parse(labels[0] ?? '{}')).toMatchObject({ scorer: 'review-quality', label: 'thorough', source: 'workflow', subject: { runId, step: 'review', pass: 1 } });
+    expect(JSON.parse(labels[0] ?? '{}')).toMatchObject({ scorer: 'review-quality', label: 'thorough', source: 'workflow', subject: { runId, step: 'review', pass: 1 }, used: { skills: ['review-notes'] } });
     expect(envelope((await runCLI(['score', '--next', '--json', JSON.stringify(judge)], app, env)).stdout).data).toEqual({ idle: { open: 0, leased: 0 } });
 
     // The label is on teamai-reports; the judge's words are only in the local reasoning file.
@@ -152,6 +154,7 @@ describe('teamai score with an external driver', () => {
     expect(published).toEqual([expect.stringMatching(/^scores\/[^/]+\/\d{4}-\d{2}\.jsonl$/)]);
     expect(JSON.parse(git(team, 'show', `teamai-reports:${published[0]}`).trim())).toMatchObject({ label: 'thorough', subject: { runId } });
     expect(() => git(team, 'grep', '-q', PHRASE, 'teamai-reports')).toThrow();
+    expect(() => git(team, 'grep', '-q', home, 'teamai-reports')).toThrow();
     expect(filesContaining(path.join(dataHome, 'workflows'), PHRASE)).toEqual([]);
     expect(filesContaining(path.join(dataHome, 'scores'), PHRASE)).toEqual([expect.stringMatching(/scores\/reasoning\/[0-9a-f]{64}\.md$/)]);
 

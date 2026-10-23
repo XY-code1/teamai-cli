@@ -551,7 +551,7 @@ function isSucceeded(member: Judged): member is Judged<SucceededAttempt> {
 
 /** Settles an open lease through `settle`; a lease already labelled answers its own labels again. */
 async function settleJudgeLease<T extends { kind: string }>(
-  config: LocalConfig, ref: string, driver: JudgeDriver, now: string, settle: (members: readonly [Judged, ...Judged[]]) => Promise<T | Refusal>,
+  config: LocalConfig, ref: string, driver: JudgeDriver, now: string, settle: (members: readonly [Judged, ...Judged[]], run: RunState) => Promise<T | Refusal>,
 ): Promise<T | Labelled | Refusal> {
   const parsedRef = parseLeaseRef(ref);
   if (!parsedRef) return error('lease_unknown', `${ref} is not a judge lease ref. A ref looks like s<13 hex>/a<8 hex>, as teamai score --next prints it.`);
@@ -592,7 +592,7 @@ async function settleJudgeLease<T extends { kind: string }>(
         }
       }
     }
-    return settle(members);
+    return settle(members, run);
   });
   if (outcome.status === 'busy') return error('busy', 'The judge attempts are locked by another process. Submit again.');
   const settled = outcome.value;
@@ -630,7 +630,7 @@ function judgeIdentity(attempt: AttemptRecord, submission: JudgeSubmission, loca
  * own judge has the access its lease declared, and ran the model and effort the lease named, as the driver reports it.
  */
 async function labelJudgeLease(config: LocalConfig, ref: string, submission: Extract<JudgeSubmission, { outcome: 'success' }>, now: string, local?: LocalRun): Promise<SettledLease> {
-  const result = await settleJudgeLease(config, ref, submission.driver, now, async (members): Promise<Labelled | Refusal> => {
+  const result = await settleJudgeLease(config, ref, submission.driver, now, async (members, run): Promise<Labelled | Refusal> => {
     const [head] = members;
     const verdicts = verdictsOf(members, (member) => member.definition, submission.answer);
     if (!verdicts.ok) return error('label_invalid', verdicts.message);
@@ -646,6 +646,8 @@ async function labelJudgeLease(config: LocalConfig, ref: string, submission: Ext
       return error('isolation_unmet', `This answer comes from a ${isolation} judge, and ${required.setBy.join(' and ')} asks for ${required.level}. The lease stays open: judge it at ${required.level} isolation, then submit again.`);
     }
     const settle = async ({ judged: { attempt, pin }, ...verdict }: (typeof verdicts.verdicts)[number]): Promise<SucceededAttempt> => {
+      const reported = evidencePlan(run, attempt.subject).passes.flatMap((judged) => judged.used ?? []);
+      const used = reported.length > 0 ? { skills: [...new Set(reported.flatMap((each) => each.skills))].sort() } : undefined;
       const label: ScoreLabel = {
         scorer: attempt.scorer,
         rubric: rubricOf(pin),
@@ -654,6 +656,7 @@ async function labelJudgeLease(config: LocalConfig, ref: string, submission: Ext
         passed: verdict.passed,
         source: 'workflow',
         subject: attempt.subject,
+        ...(used ? { used } : {}),
         judge: {
           kind: 'model',
           tool,

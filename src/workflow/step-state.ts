@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AgentObservationSchema } from '../agent-observation.js';
+import { AgentObservationSchema, UsedSchema } from '../agent-observation.js';
 import { DriverSchema } from '../driver-identity.js';
 import type { TokenUsage } from '../tool-launch/stdout.js';
 import type { StepLease, WorkflowFailure } from './types.js';
@@ -56,6 +56,8 @@ const report = {
    * version's, reads as absent rather than making the run unreadable.
    */
   agent: AgentObservationSchema.optional().catch(undefined),
+  /** The team skills the pass loaded, by name, as its driver reported them; absent when it reported none. */
+  used: UsedSchema.optional().catch(undefined),
   /** The install whose `report` settled the attempt, so scoring knows which machine holds its session after a claim. */
   installId: z.string().optional(),
 };

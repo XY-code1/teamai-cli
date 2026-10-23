@@ -199,13 +199,13 @@ const STEP_RULES = {
   iteration: 'publish', round: 'publish', status: 'publish', attempt: 'publish', lease: 'rewrite', outcome: 'publish',
   outputs: 'publish', end: 'publish', results: 'publish', settledAt: 'publish', exitCode: 'publish', message: 'drop',
   tool: 'publish', model: 'publish', session: 'publish', tokens: 'publish', changes: 'publish', read: 'publish',
-  agent: 'publish', installId: 'publish', loopFinal: 'publish', failure: 'rewrite',
+  agent: 'publish', used: 'publish', installId: 'publish', loopFinal: 'publish', failure: 'rewrite',
 } satisfies FieldRules<StepState>;
 
 const PASS_RULES = {
   pass: 'publish', attempt: 'publish', outcome: 'publish', outputs: 'publish', end: 'publish', results: 'publish',
   failure: 'rewrite', exitCode: 'publish', message: 'drop', tool: 'publish', model: 'publish', session: 'publish',
-  tokens: 'publish', changes: 'publish', read: 'publish', agent: 'publish', installId: 'publish', answer: 'rewrite',
+  tokens: 'publish', changes: 'publish', read: 'publish', agent: 'publish', used: 'publish', installId: 'publish', answer: 'rewrite',
 } satisfies FieldRules<StepPass>;
 
 const ARCHIVED_RULES = { ...PASS_RULES, step: 'publish', within: 'publish' } satisfies FieldRules<ArchivedPass>;

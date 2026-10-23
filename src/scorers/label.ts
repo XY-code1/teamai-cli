@@ -4,7 +4,7 @@
  */
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { AgentObservationSchema, ObservedEffortSchema, ObservedModelSchema } from '../agent-observation.js';
+import { AgentObservationSchema, ObservedEffortSchema, ObservedModelSchema, UsedSchema } from '../agent-observation.js';
 import { canonicalJson } from '../utils/canonical-json.js';
 
 export const RunSubjectSchema = z.object({ runId: z.string().min(1), step: z.string().min(1), pass: z.number().int().positive() });
@@ -66,14 +66,20 @@ const LabelFields = {
 
 /** Unknown keys are dropped, so a label a newer teamai wrote still reads here. */
 export const ScoreLabelSchema = z.discriminatedUnion('source', [
-  z.object({ ...LabelFields, source: z.literal('workflow'), subject: RunSubjectSchema }),
+  z.object({
+    ...LabelFields,
+    source: z.literal('workflow'),
+    subject: RunSubjectSchema,
+    /** The team skills the judged pass loaded, as its driver reported them. */
+    used: UsedSchema.optional(),
+  }),
   z.object({
     ...LabelFields,
     source: z.literal('session'),
     subject: SessionSubjectSchema,
     agent: AgentObservationSchema.optional(),
     /** The team skills the session or its subagents loaded. */
-    used: z.object({ skills: z.array(z.string().min(1)) }).optional(),
+    used: UsedSchema.optional(),
   }),
 ]);
 export type ScoreLabel = z.infer<typeof ScoreLabelSchema>;

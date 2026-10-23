@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { parseReportedAgent, settleObservation, type ReportedAgent } from '../agent-observation.js';
+import { parseReportedAgent, parseReportedUsed, settleObservation, type ReportedAgent, type Used } from '../agent-observation.js';
 import { DriverSchema } from '../driver-identity.js';
 import { log } from '../utils/logger.js';
 import type { LocalConfig } from '../types.js';
@@ -68,6 +68,8 @@ export interface ReportInput {
   /** The branch and commit this attempt read, when it ran read-only in a workspace. */
   read?: StepRead;
   agent?: ReportedAgent;
+  /** The team skills the attempt loaded, by name. */
+  used?: Used;
 }
 
 /** A protocol rejection that retains its actionable code and message. */
@@ -994,7 +996,7 @@ const NEXT_PAYLOAD_FIELDS = new Set(['driver', 'running', 'canTakeLease', 'base'
 
 /** The top-level payload fields `parseReport` reads. Keep in sync with the fields it picks. */
 const REPORT_FIELDS = new Set([
-  'attempt', 'revision', 'outcome', 'driver', 'outputs', 'exitCode', 'message', 'tool', 'model', 'session', 'resumed', 'tokens', 'failure', 'changes', 'read', 'agent',
+  'attempt', 'revision', 'outcome', 'driver', 'outputs', 'exitCode', 'message', 'tool', 'model', 'session', 'resumed', 'tokens', 'failure', 'changes', 'read', 'agent', 'used',
 ]);
 
 /**
@@ -1107,6 +1109,11 @@ export function parseReport(value: unknown): ParsedReport | string {
     const agent = parseReportedAgent(record.agent);
     if (typeof agent === 'string') return agent;
     report.agent = agent;
+  }
+  if (record.used !== undefined) {
+    const used = parseReportedUsed(record.used);
+    if (typeof used === 'string') return used;
+    if (used) report.used = used;
   }
   return { report, ignored: unreadFields(record, REPORT_FIELDS) };
 }
@@ -1331,6 +1338,7 @@ export async function reportAttempt(config: LocalConfig, runId: string, report: 
       ...(report.changes ? { changes: report.changes } : {}),
       ...(report.read ? { read: report.read } : {}),
       agent: settleObservation(report, defined?.agent),
+      ...(report.used ? { used: report.used } : {}),
       installId: install.id,
     };
     if (outcome !== 'released') continueSession(run, report);

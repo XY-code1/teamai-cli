@@ -16,7 +16,7 @@ import { z } from 'zod';
 import { getAgentVersion } from './agent-version.js';
 import { getCurrentVersion } from './package-info.js';
 import { recordedUnchanged } from './resources/delivered-copies.js';
-import { DeliverySelectionSchema, type LocalConfig } from './types.js';
+import { DeliverySelectionSchema, SKILL_NAME_REGEX, type LocalConfig } from './types.js';
 import { getHeadState, type HeadState } from './utils/git.js';
 
 /**
@@ -55,6 +55,10 @@ export const AgentObservationSchema = z.object({
   fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 export type AgentObservation = z.infer<typeof AgentObservationSchema>;
+
+/** The team skills a pass or session loaded, by name. Absent when nothing observed them, so `[]` means none was loaded. */
+export const UsedSchema = z.object({ skills: z.array(z.string().min(1)) });
+export type Used = z.infer<typeof UsedSchema>;
 
 /**
  * What a driver may report. It has no key the engine owns (definition.name, teamai, driver) and no fingerprint. Zod
@@ -251,4 +255,16 @@ export function readRecordedAgent(value: unknown): RecordedAgent | undefined {
   if (observation.success) return observation.data;
   const definitionOnly = DefinitionOnlySchema.safeParse(value);
   return definitionOnly.success ? definitionOnly.data : undefined;
+}
+
+/**
+ * Parse the `used` field of a report payload, or return an `invalid_report` message for a wrong JSON type. A skill not
+ * shaped like a skill name, such as a path, is dropped, not rejected; a list that leaves nothing is no observation.
+ */
+export function parseReportedUsed(value: unknown): Used | undefined | string {
+  const parsed = z.object({ skills: z.array(z.string()) }).safeParse(value);
+  if (!parsed.success) return 'used must be an object whose skills is an array of skill names';
+  const { skills } = parsed.data;
+  const named = [...new Set(skills.filter((skill) => SKILL_NAME_REGEX.test(skill)))].sort();
+  return named.length > 0 || skills.length === 0 ? { skills: named } : undefined;
 }

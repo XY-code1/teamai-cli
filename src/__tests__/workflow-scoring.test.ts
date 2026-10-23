@@ -11,7 +11,7 @@ import { LabelStore } from '../scorers/label-store.js';
 import { getReportsDir, type LocalConfig } from '../types.js';
 import { log } from '../utils/logger.js';
 import { syncWorkflowDefinitions } from '../workflow/cache.js';
-import { leaseNext, reportAttempt, startRun } from '../workflow/engine.js';
+import { leaseNext, parseReport, reportAttempt, startRun } from '../workflow/engine.js';
 import { workflowRunDetail } from '../dashboard/workflow-runs.js';
 import { buildEndRecord } from '../workflow/records.js';
 import { projectRun } from '../workflow/snapshot.js';
@@ -83,12 +83,17 @@ async function runOf(config: LocalConfig, runId: string): Promise<RunState> {
   return run;
 }
 
-/** Starts the review workflow and settles its one step through workflow next and report, as an external driver would. */
-async function settledRun(config: LocalConfig): Promise<string> {
+/**
+ * Starts the review workflow and settles its one step through workflow next and report, as an external driver would,
+ * with `reported` added to its report payload.
+ */
+async function settledRun(config: LocalConfig, reported: Record<string, unknown> = {}): Promise<string> {
   await syncWorkflowDefinitions(config);
   const runId = String(data(await startRun(config, 'review')).run);
   const lease = z.object({ attempt: z.string(), revision: z.number() }).parse(data(await leaseNext(config, runId, workDriver)).lease);
-  data(await reportAttempt(config, runId, { attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver: workDriver, outputs: { reviewed: true } }));
+  const parsed = parseReport({ attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver: workDriver, outputs: { reviewed: true }, ...reported });
+  if (typeof parsed === 'string') throw new Error(parsed);
+  data(await reportAttempt(config, runId, parsed.report));
   expect(data(await leaseNext(config, runId, workDriver))).toMatchObject({ done: { outcome: 'succeeded' } });
   return runId;
 }
@@ -562,6 +567,70 @@ describe('scoredPasses', () => {
   });
 });
 
+describe('team skills a pass used', () => {
+  const labelled = async (config: LocalConfig): Promise<unknown> => {
+    const lease = leaseOf(await nextJudgeLease(config, request()));
+    data(await submitJudgeLease(config, lease.ref, { driver: judgeDriver, outcome: 'success', answer: { label: 'good', reasoning: 'r' } }));
+    return (await LabelStore.local(config))[0];
+  };
+
+  it('labels a pass with the team skills its driver reported, without a value not shaped like a skill name', async () => {
+    const config = fixture(scorer(100));
+    await settledRun(config, { used: { skills: ['review-notes', '/Users/me/.claude/skills/deploy/SKILL.md'] } });
+    expect(await labelled(config)).toMatchObject({ source: 'workflow', used: { skills: ['review-notes'] } });
+  });
+
+  it.each([
+    ['no used', {}, 'absent'],
+    ['no skill loaded', { used: { skills: [] } }, { skills: [] }],
+    ['only values not shaped like a skill name', { used: { skills: ['/Users/me/.claude/skills/deploy/SKILL.md'] } }, 'absent'],
+  ])('labels a pass whose driver reported %s with what it observed', async (_, reported, used) => {
+    const config = fixture(scorer(100));
+    await settledRun(config, reported);
+    const label = z.object({ source: z.literal('workflow') }).passthrough().parse(await labelled(config));
+    expect('used' in label ? label.used : 'absent').toEqual(used);
+  });
+
+  it.each([
+    ['each child reported skills', [{ used: { skills: ['review-notes'] } }, { used: { skills: ['deploy-notes', 'review-notes'] } }], { skills: ['deploy-notes', 'review-notes'] }],
+    ['one child reported skills', [{ used: { skills: ['review-notes'] } }, {}], { skills: ['review-notes'] }],
+    ['no child reported used', [{}, {}], 'absent'],
+  ])('labels a sub-workflow pass with the team skills its child passes used when %s', async (_, reports, used) => {
+    const config = fixture(scorer(100));
+    fs.writeFileSync(path.join(config.repo.localPath, 'workflows', 'review.yaml'), `schemaVersion: v1alpha1
+name: review
+description: One reviewed sub-workflow.
+steps:
+  - id: check
+    scorers: [quality]
+    workflow:
+      steps:
+        - id: draft
+          prompt: Draft the change.
+        - id: review
+          needs: [draft]
+          prompt: Review the change.
+`);
+    await syncWorkflowDefinitions(config);
+    const runId = String(data(await startRun(config, 'review')).run);
+    for (const reported of reports) {
+      const lease = z.object({ attempt: z.string(), revision: z.number() }).parse(data(await leaseNext(config, runId, workDriver)).lease);
+      const parsed = parseReport({ attempt: lease.attempt, revision: lease.revision, outcome: 'success', driver: workDriver, outputs: { done: true }, ...reported });
+      if (typeof parsed === 'string') throw new Error(parsed);
+      data(await reportAttempt(config, runId, parsed.report));
+    }
+    expect(data(await leaseNext(config, runId, workDriver))).toMatchObject({ done: { outcome: 'succeeded' } });
+
+    const label = z.object({ subject: z.object({ step: z.literal('check') }) }).passthrough().parse(await labelled(config));
+    expect('used' in label ? label.used : 'absent').toEqual(used);
+  });
+
+  it('refuses a report whose used is not a list of skill names', () => {
+    expect(parseReport({ attempt: 'a1', revision: 1, outcome: 'success', driver: workDriver, used: { skills: 'review-notes' } }))
+      .toBe('used must be an object whose skills is an array of skill names');
+  });
+});
+
 describe('run snapshot', () => {
   it('publishes the pinned scorers by hash only, and the install and within stamps as they are', async () => {
     const config = fixture(scorer(100));
@@ -572,6 +641,15 @@ describe('run snapshot', () => {
     expect(JSON.stringify(projected.value)).not.toContain('Judge the review.');
     expect(projected.value.steps[0]).toMatchObject({ installId: (await installOwner(config)).id });
     expect(projected.value.archive[0]).toMatchObject({ within: { step: 'x', pass: 1 } });
+  });
+
+  it('publishes the team skills a pass used, by name', async () => {
+    const config = fixture(scorer(100));
+    const run = await runOf(config, await settledRun(config, { used: { skills: ['review-notes'] } }));
+    const projected = projectRun({ ...run, archive: [{ step: 'x.y', pass: 1, outcome: 'success', used: { skills: ['deploy-notes'] } }] }, {});
+    if (!projected.ok) throw new Error(projected.error.message);
+    expect(projected.value.steps[0]).toMatchObject({ used: { skills: ['review-notes'] } });
+    expect(projected.value.archive[0]).toMatchObject({ used: { skills: ['deploy-notes'] } });
   });
 });
 
