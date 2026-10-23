@@ -17,6 +17,7 @@ import {
   reconcileRequestLog,
   dedupeEvents,
   dashboardReport,
+  GIT_AT_START_PAYLOAD_KEY,
 } from '../dashboard-collector.js';
 import { collectSession } from '../session-collector.js';
 import type { DashboardEvent } from '../types.js';
@@ -2881,6 +2882,19 @@ describe('dashboard-report records the git state a session started on', () => {
     for (const e of events) {
       expect(e).not.toHaveProperty('gitAtStart');
     }
+  });
+
+  it('takes the git state the session start already read, and reads none itself', async () => {
+    const plain = path.join(tmpDir, 'plain');
+    fs.mkdirSync(plain, { recursive: true });
+    const read = { head: 'c'.repeat(40), dirty: true };
+
+    await runHook({ hook_event_name: 'SessionStart', session_id: 'git-read', cwd: plain, [GIT_AT_START_PAYLOAD_KEY]: read });
+    await runHook({ hook_event_name: 'SessionStart', session_id: 'git-none', cwd: plain, [GIT_AT_START_PAYLOAD_KEY]: null });
+
+    expect((await readEvents()).map((e) => e.gitAtStart)).toEqual([read, undefined]);
+    expect(fs.existsSync(path.join(tmpDir, '.teamai', 'debug.log')) ? fs.readFileSync(path.join(tmpDir, '.teamai', 'debug.log'), 'utf-8') : '')
+      .not.toContain('could not read the git state');
   });
 
   it('records each start on its own, and collectSession reports the earliest', async () => {

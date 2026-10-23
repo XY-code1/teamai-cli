@@ -255,7 +255,7 @@ Generated: do not edit by hand. Regenerate with
   - `--step <path>` — With --run: the step path, such as review or check.review
   - `--pass <n>` — With --run: the pass to judge; default the step's latest succeeded pass
   - `--session <id>` — Judge this finished session of an agent tool on this machine, whatever sampling says, with --scorer. Prints the session's first prompt and directory first, then the label; the session and the judge's reasoning are never published.
-  - `--source <platform>` — With --session: the tool that holds it, as session migrate --source names it (claude-code, codex, opencode, …); needed unless the agent session variable names that session
+  - `--source <platform>` — With --session: the tool that holds it, as session migrate --source names it (claude-code, codex, opencode, …); needed unless the agent session variable names that session, or the captures its session-start hook wrote here name one platform for it
   - `--scorer <name>` — With --run: a scorer the run pinned or one teamai pull cached. With --session, or alone inside a session: a scorer teamai pull cached. Repeatable.
   - `--queue` — With --run: leave the work to any driver's score --next instead of judging it here
   - `--batch` — With --run or --session: the scorers share one judge call when they resolve to the same tool and model

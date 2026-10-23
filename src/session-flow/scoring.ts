@@ -32,6 +32,7 @@ import { agentSessionFromEnv } from '../utils/session-id.js';
 import { AgentSession } from './agent-session.js';
 import { listAvailablePlatforms, listInstalledPlatforms } from './adapters/index.js';
 import type { SubagentsRead } from './adapters/base.js';
+import { SessionCaptures } from './captures.js';
 import type { Session } from './ir.js';
 
 function failure(code: string, message: string): WorkflowEnvelope {
@@ -77,12 +78,13 @@ interface Asked {
   alias?: string;
 }
 
-async function sessionOf(demand: SessionDemand): Promise<{ platform: string; sessionId: string } | Extract<WorkflowEnvelope, { error: unknown }>> {
+async function sessionOf(config: LocalConfig, demand: SessionDemand): Promise<{ platform: string; sessionId: string } | Extract<WorkflowEnvelope, { error: unknown }>> {
   const env = await agentSessionFromEnv();
   const current = env.unambiguous && env.id ? { sessionId: env.id, platform: env.agent && AgentSession.platformForTool(env.agent) } : undefined;
   const sessionId = demand.session ?? current?.sessionId;
   if (sessionId === undefined) return { error: { code: 'session_required', message: 'Pass --session <id>; scoring never guesses the session.' } };
-  const platform = demand.source ?? (current?.sessionId === sessionId ? current.platform : undefined);
+  const captured = await SessionCaptures.platformsOf(config, sessionId);
+  const platform = demand.source ?? (current?.sessionId === sessionId ? current.platform : undefined) ?? (captured.length === 1 ? captured[0] : undefined);
   if (platform !== undefined) return { platform, sessionId };
   const holding: string[] = [];
   for (const candidate of listInstalledPlatforms()) {
@@ -112,7 +114,7 @@ async function scopeOf(config: LocalConfig, platform: string, session: Session):
  * model share one judge call with `batch` or the team's `scoring.batch`.
  */
 export async function scoreSession(from: LocalConfig, demand: SessionDemand, now = new Date().toISOString()): Promise<WorkflowEnvelope> {
-  const named = await sessionOf(demand);
+  const named = await sessionOf(from, demand);
   if ('error' in named) return named;
   const { platform, sessionId } = named;
   const found = await AgentSession.find({ platform, sessionId }, { subagents: true });
@@ -165,6 +167,9 @@ export async function scoreSession(from: LocalConfig, demand: SessionDemand, now
   const manifest = { subject, kind: 'session', gaps: judged.gaps };
   const framing = `## evidence.json\n\n${JSON.stringify(manifest)}\n\n## transcripts/session.md\n\n`.length;
   const body = keepEnds(mask(judged.body), EVIDENCE_MAX_CHARS - framing);
+  const models = new Set(session.messages.flatMap((message) => message.metadata?.model ?? []));
+  const [reportedModel] = models.size === 1 ? models : [];
+  const agent = SessionCaptures.agentOf(await SessionCaptures.read(config, platform, session.sessionId), reportedModel);
   const answers: Array<Record<string, unknown>> = [];
   for (const { choice, members } of groups) {
     const [head, ...tail] = members;
@@ -207,6 +212,7 @@ export async function scoreSession(from: LocalConfig, demand: SessionDemand, now
           passed,
           source: 'session',
           subject,
+          ...(agent ? { agent } : {}),
           judge: { kind: 'model', ...result.judge, ...(model ? { model } : {}), ...(members.length > 1 ? { batched: true as const } : {}) },
           scoredAt: now,
         } satisfies ScoreLabel };

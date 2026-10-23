@@ -17,7 +17,7 @@ import { getAgentVersion } from './agent-version.js';
 import { getCurrentVersion } from './package-info.js';
 import { recordedUnchanged } from './resources/delivered-copies.js';
 import type { LocalConfig } from './types.js';
-import { getHeadState } from './utils/git.js';
+import { getHeadState, type HeadState } from './utils/git.js';
 
 /**
  * A model as a driver reports it, such as `claude-sonnet-4.6` or `anthropic/claude-sonnet-4.6@2026`. A report is free
@@ -101,15 +101,22 @@ export type ToolLaunch = {
   };
   /** The model the step or its `defaults.model` chose, which the launch passes on argv in place of the definition's. */
   chosen?: { model: string; effort?: string; alias?: string };
+  /** The checkout's git state when the launch already read it, null when it found none; read here otherwise. */
+  head?: HeadState | null;
 };
 
 /** Observe a launch before the tool starts. Never throws: each field it cannot observe is left out. */
 export async function observeLaunch(launch: ToolLaunch): Promise<ReportedAgent> {
+  const [version, checkout] = await Promise.all([getAgentVersion(launch.tool), observeCheckout(launch)]);
+  return { ...(version ? { tool: { version } } : {}), ...checkout };
+}
+
+/** What `observeLaunch` reads from the checkout and the pull record, without running the tool for its version. */
+export async function observeCheckout(launch: ToolLaunch): Promise<ReportedAgent> {
   const { teamDelivery } = await import('./pull.js');
-  const [version, delivery, head] = await Promise.all([
-    getAgentVersion(launch.tool),
+  const [delivery, head] = await Promise.all([
     teamDelivery(launch.config, launch.tool).catch(() => undefined),
-    getHeadState(launch.cwd).catch(() => null),
+    launch.head !== undefined ? launch.head : getHeadState(launch.cwd).catch(() => null),
   ]);
   const record = delivery?.record;
   const definition = launch.definition;
@@ -130,7 +137,6 @@ export async function observeLaunch(launch: ToolLaunch): Promise<ReportedAgent> 
     ? { revision: delivery.commit, localChanges: !await allUnchanged(delivery.record.delivered ?? {}) }
     : undefined;
   return {
-    ...(version ? { tool: { version } } : {}),
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(team ? { team } : {}),

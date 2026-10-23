@@ -880,7 +880,7 @@ program
   .option('--step <path>', 'With --run: the step path, such as review or check.review')
   .option('--pass <n>', 'With --run: the pass to judge; default the step\'s latest succeeded pass')
   .option('--session <id>', 'Judge this finished session of an agent tool on this machine, whatever sampling says, with --scorer. Prints the session\'s first prompt and directory first, then the label; the session and the judge\'s reasoning are never published.')
-  .option('--source <platform>', 'With --session: the tool that holds it, as session migrate --source names it (claude-code, codex, opencode, …); needed unless the agent session variable names that session')
+  .option('--source <platform>', 'With --session: the tool that holds it, as session migrate --source names it (claude-code, codex, opencode, …); needed unless the agent session variable names that session, or the captures its session-start hook wrote here name one platform for it')
   .option('--scorer <name>', 'With --run: a scorer the run pinned or one teamai pull cached. With --session, or alone inside a session: a scorer teamai pull cached. Repeatable.', (value: string, previous: string[]) => previous.concat(value), [] as string[])
   .option('--queue', 'With --run: leave the work to any driver\'s score --next instead of judging it here')
   .option('--batch', 'With --run or --session: the scorers share one judge call when they resolve to the same tool and model')

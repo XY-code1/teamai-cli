@@ -491,6 +491,18 @@ export async function hookDispatchCli(
       return;
     }
 
+    // What the session starts as, read before the detached pull can deliver a new revision into the checkout (#1178),
+    // with the one git state the dashboard's session_start event records too.
+    if (event === 'session-start' && localConfig) {
+      const { GIT_AT_START_PAYLOAD_KEY, readGitStateAtStart } = await import('./dashboard-collector.js');
+      if (cwd) stdin[GIT_AT_START_PAYLOAD_KEY] = await readGitStateAtStart(cwd);
+      else delete stdin[GIT_AT_START_PAYLOAD_KEY];
+      const { CAPTURE_PAYLOAD_KEY, SessionCaptures } = await import('./session-flow/captures.js');
+      const captureId = await SessionCaptures.atStart(localConfig, tool, stdin, process.env);
+      if (captureId) stdin[CAPTURE_PAYLOAD_KEY] = captureId;
+      else delete stdin[CAPTURE_PAYLOAD_KEY];
+    }
+
     // Parent: kick off background handlers in a detached process first so they
     // start working while we run the inline (foreground) pass.
     let settling: Promise<void> | undefined;

@@ -231,6 +231,21 @@ describe('teamai score --session', () => {
     expect(fs.existsSync(path.join(root, 'judged.md'))).toBe(false);
   });
 
+  it('takes the platform of --session from its captures when they name exactly one', async () => {
+    const config = await fixture();
+    plantClaudeSession(path.join(root, 'app'), 'Add retries to the client');
+    const dir = path.join(root, 'data', 'sessions', 'captures', 'claude-code', SESSION);
+    fs.mkdirSync(dir, { recursive: true });
+    const captureId = '0b6f2a52-5d7e-4c7e-9a43-6a3c1d0e2f01';
+    fs.writeFileSync(path.join(dir, `${captureId}.json`), JSON.stringify({ captureId, platform: 'claude-code', sessionId: SESSION,
+      capturedAt: '2026-10-20T10:00:00.000Z', agent: { v: 1, tool: { name: 'claude' }, teamai: '1.0.0', driver: 'session' } }));
+    fakeClaude('good');
+
+    expect(data(await scoreSession(config, { session: SESSION, scorers: ['quality'] }))).toMatchObject({
+      label: { subject: { platform: 'claude-code', sessionId: SESSION } },
+    });
+  });
+
   it('gives the judge the tool calls of the subagents the session started', async () => {
     const config = await fixture();
     plantClaudeSession(path.join(root, 'app'), 'Add retries to the client');
@@ -524,5 +539,88 @@ describe('teamai score --session', () => {
     const held = await AttemptStore.locked(config, () => scoreSession(config, { session: SESSION, source: 'claude-code', scorers: ['quality'] }));
     expect(held).toMatchObject({ status: 'done', value: { error: { code: 'busy' } } });
     expect(fs.existsSync(path.join(root, 'data', 'scores', 'labels.jsonl'))).toBe(false);
+  });
+
+  describe('the agent a session ran as', () => {
+    const FULL = 'a'.repeat(40);
+    const observed = { v: 1, tool: { name: 'claude', version: '2.1.308' }, model: { requested: 'claude-x' }, team: { revision: FULL, localChanges: false },
+      project: { commit: 'b'.repeat(40), dirty: false }, teamai: '1.0.0', driver: 'session', fingerprint: 'f'.repeat(64) };
+
+    function capture(id: string, agent: Record<string, unknown>, extra: Record<string, unknown> = {}, dataHome = path.join(root, 'data')): void {
+      const dir = path.join(dataHome, 'sessions', 'captures', 'claude-code', SESSION);
+      fs.mkdirSync(dir, { recursive: true });
+      const captureId = `0b6f2a52-5d7e-4c7e-9a43-6a3c1d0e2f${id}`;
+      fs.writeFileSync(path.join(dir, `${captureId}.json`), JSON.stringify({ captureId, platform: 'claude-code', sessionId: SESSION, capturedAt: `2026-10-20T10:00:${id}.000Z`, agent, ...extra }));
+    }
+
+    async function scoredAgent(): Promise<unknown> {
+      const config = await fixture();
+      plantClaudeSession(path.join(root, 'app'), 'Add retries to the client');
+      fakeClaude('good');
+      data(await scoreSession(config, { session: SESSION, source: 'claude-code', scorers: ['quality'] }));
+      const [label] = parseScoreLabels(fs.readFileSync(path.join(root, 'data', 'scores', 'labels.jsonl'), 'utf8'));
+      return label && 'agent' in label ? label.agent : undefined;
+    }
+
+    it('is the observation every capture holds, with the one model the session\'s messages name', async () => {
+      capture('10', observed);
+      capture('20', { ...observed, project: { commit: 'c'.repeat(40), dirty: true } });
+
+      expect(await scoredAgent()).toEqual({ ...observed, model: { requested: 'claude-x', reported: 'claude-x' }, fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    });
+
+    it('keeps everything but the team and the fingerprint after the session\'s pull delivered a new revision', async () => {
+      capture('10', observed);
+      capture('20', observed, { teamChanged: true });
+
+      const agent = await scoredAgent();
+      expect(agent).toMatchObject({ tool: observed.tool, model: { requested: 'claude-x' }, project: observed.project });
+      expect(agent).not.toHaveProperty('team');
+      expect(agent).not.toHaveProperty('fingerprint');
+    });
+
+    it('keeps everything but the team when a resume captured the revision the session\'s pull delivered', async () => {
+      capture('10', observed, { teamChanged: true });
+      capture('20', { ...observed, team: { revision: 'c'.repeat(40), localChanges: false } });
+
+      const agent = await scoredAgent();
+      expect(agent).toMatchObject({ tool: observed.tool, model: { requested: 'claude-x' } });
+      expect(agent).not.toHaveProperty('team');
+    });
+
+    it('is absent when two captures differ in model, or when nothing captured the session', async () => {
+      capture('10', observed);
+      capture('20', { ...observed, model: { requested: 'claude-y' } });
+      expect(await scoredAgent()).toBeUndefined();
+
+      fs.rmSync(path.join(root, 'data', 'sessions'), { recursive: true });
+      expect(await scoredAgent()).toBeUndefined();
+    });
+
+    it('is read from the scope the session ran in, also when it is scored from another one', async () => {
+      const { userHome, elsewhere } = await scopedElsewhere('self');
+      capture('10', observed, {}, userHome);
+
+      data(await scoreSession(elsewhere, { session: SESSION, source: 'claude-code', scorers: ['quality'] }));
+
+      const [label] = parseScoreLabels(fs.readFileSync(path.join(userHome, 'scores', 'labels.jsonl'), 'utf8'));
+      expect(label && 'agent' in label ? label.agent?.tool : undefined).toEqual(observed.tool);
+    });
+
+    it('names no reported model when the session\'s messages name two', async () => {
+      capture('10', observed);
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantClaudeSession(cwd, 'Add retries to the client');
+      fs.appendFileSync(path.join(mocks.home, '.claude', 'projects', encodeCwdClaude(cwd), `${SESSION}.jsonl`), line({
+        type: 'assistant', uuid: 'u3', parentUuid: 'u2', cwd, sessionId: SESSION, timestamp: '2026-10-20T10:00:02.000Z',
+        message: { role: 'assistant', model: 'claude-z', content: [{ type: 'text', text: 'And the backoff.' }] },
+      }));
+      fakeClaude('good');
+
+      data(await scoreSession(config, { session: SESSION, source: 'claude-code', scorers: ['quality'] }));
+      const [label] = parseScoreLabels(fs.readFileSync(path.join(root, 'data', 'scores', 'labels.jsonl'), 'utf8'));
+      expect(label && 'agent' in label ? label.agent?.model : undefined).toEqual({ requested: 'claude-x' });
+    });
   });
 });
