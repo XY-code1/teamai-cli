@@ -2,7 +2,7 @@
 
 > Part of the [TeamAI CLI Usage Guide](../usage-guide.md).
 
-A scorer is a rubric a judge applies to a workflow step's work. It is a Markdown file at `scorers/<name>.md` in the team repo.
+A scorer is a rubric a judge applies to a workflow step's work or to a finished agent session. It is a Markdown file at `scorers/<name>.md` in the team repo.
 
 `scorers/review-quality.md`:
 
@@ -93,6 +93,8 @@ $ teamai score --lease s5d1e07c2a9b4/a91c0d7e --json '{"driver":{"kind":"local",
 
 `samplingRate` picks the succeeded passes to judge, the same way on every machine. `workflow next` never hands out judge work. `--lease <ref>` judges here with the tool the lease names, in a [confined profile](#isolation), and settles the lease like any driver's answer. A failed judge leaves the lease open.
 
+The label records `used.skills`, the team skills the pass or its subagents loaded, found as for [a session](#score-a-session) from what the checkout held as teamai delivered it when the pass started. A `workflow:` step's label lists every skill its child passes recorded, and has no `used` when none of them recorded one.
+
 The evidence directory holds `evidence.json`, `prompt.md`, `diff.patch` when a range was recorded, `repo/` (tracked files at the judged commit, symlink targets stored as text), `transcripts/` (with readable subagents) and `outputs.json`. Every file is redacted, including the values of the secrets the team declares in `env/secrets.yaml`. A tracked file that is not text is left out and listed under `omitted`. Missing evidence is listed as gap codes. It is removed when the lease settles or lapses.
 
 ## Any driver
@@ -116,6 +118,14 @@ JSON
 
 A label the scorer does not list is refused, and the lease stays open. `running` lists the refs you still judge, which renews them; a lease lapses 30 minutes after it was taken or renewed. Never list a judge ref in `workflow next`'s `running`. `teamai score --help` has every field.
 
+Your driver names the team skills a pass loaded when it reports the pass, and the pass's labels carry them:
+
+```console
+$ teamai workflow report r3f9… --json '{"attempt":"…","revision":3,"outcome":"success","driver":{…},"used":{"skills":["review-notes"]}}'
+```
+
+Names only: a value that is not a skill name, such as a path, is dropped. A report without `used` gives labels without it; `"skills":[]` says the pass loaded no team skill.
+
 ## On demand
 
 ```console
@@ -124,6 +134,23 @@ $ teamai score --run r3f9… --step review --pass 2 --scorer review-quality --qu
 ```
 
 Sampling does not apply, and judge work that failed or expired opens again. A scorer the run pinned judges with that rubric; any other scorer `teamai pull` cached, with its current one. Without `--queue`, the first judge tool on PATH runs, preferring the tool that ran the pass. An unknown run, step, pass or scorer fails and lists the ones that exist. A scorer whose model no judge tool here runs fails `judge_model_unavailable` and stays open. The error's `labels` lists what the other scorers labelled.
+
+## Score a session
+
+```console
+$ teamai score --scorer review-quality          # inside an agent session: scores that session
+ℹ Scoring claude-code session 7c1e… in /work/app
+ℹ First prompt: Add retries to the client
+ℹ review-quality: bad (score 0, did not pass). Reasoning: ~/.teamai/scores/reasoning/9f2c….md
+ℹ To share what went wrong, ask your agent to read ~/.teamai/scores/reasoning/9f2c….md and share it with the team (teamai contribute --session-id 7c1e…).
+$ teamai score --session 7c1e… --source codex --scorer review-quality --push
+```
+
+Outside a session, pass `--session <id>`. Scoring never guesses the session. `--source` takes the platform names of `teamai session migrate --source`. Leave it out when an agent session variable such as `CLAUDE_CODE_SESSION_ID`, or the session's captures, name one platform. The judge reads the redacted session with its subagents' transcripts, and sampling does not apply.
+
+The judge reads at most 200,000 characters of a session. A session scorer that names a cheaper [model alias](#choose-the-judges-model) keeps a long session cheap to judge.
+
+The label is kept in the scope the session ran in, from whichever directory you score it. It records `agent`, what the session ran as, from the captures the session-start hook writes. It records `used.skills`, the team skills the session or its subagents loaded that its captures show teamai delivered, unchanged, when it started, including by the pull it runs at start. A later pull does not change that. A skill the captures cannot place, such as a member's own skill with a team skill's name, is left out. `--push` publishes every pending label of that scope. With [usage reporting](reporting.md) off, it prints `Usage reporting is off, so labels stay on this machine.` and the labels stay pending. An http team repo has no `teamai-reports`, so `--push` fails with `unsupported_repo` and the labels stay here. `teamai doctor` warns while a label waits to be published.
 
 ## Batching
 
@@ -178,6 +205,7 @@ A `best-effort` tool cannot judge for a scorer that requires `verified`. Prompts
 | `<dataHome>/scores/labels.jsonl` | Every label on this machine. |
 | `<dataHome>/scores/reasoning/` | The judge's reasoning, one file per label. Never published. |
 | `<dataHome>/scores/raw/` | A failed local judge's output, until a later attempt replaces it. |
-| `scores/<member>/<YYYY-MM>.jsonl` on `teamai-reports` | Published labels, the newest per scorer, rubric, pass and judge kind. Labels wait in `<dataHome>/scores/pending/` until a push lands, and stay there while usage reporting is off. |
+| `<dataHome>/sessions/captures/` | What each session started as, written by the session-start hook. Removed a day after the session's file is gone. |
+| `scores/<member>/<YYYY-MM>.jsonl` on `teamai-reports` | Published labels, the newest per scorer, rubric, subject and judge kind. Labels wait in `<dataHome>/scores/pending/` until a push lands, and stay there while usage reporting is off. |
 
 Labels never enter the run or its record. Workflow Runs shows each pass's labels, and what judging cost apart from the run's own tokens. For a run on this machine that counts every judge attempt; for a run a member published, only the labelled ones.

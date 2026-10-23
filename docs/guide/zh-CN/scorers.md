@@ -2,7 +2,7 @@
 
 > 本文是 [TeamAI CLI 使用指南](../../usage-guide.zh-CN.md) 的一部分。
 
-评分器（scorer）是评审者用来评判工作流步骤成果的评分标准。它是团队仓库里的 Markdown 文件 `scorers/<name>.md`。
+评分器（scorer）是评审者用来评判工作流步骤成果或已结束的 agent 会话的评分标准。它是团队仓库里的 Markdown 文件 `scorers/<name>.md`。
 
 `scorers/review-quality.md`：
 
@@ -93,6 +93,8 @@ $ teamai score --lease s5d1e07c2a9b4/a91c0d7e --json '{"driver":{"kind":"local",
 
 `samplingRate` 决定评判哪些成功的执行轮次，在每台机器上结果相同。`workflow next` 从不分发评审任务。`--lease <ref>` 在本机用租约选定的工具、以[受限配置](#隔离)评判，并像任意 driver 的答案一样结算租约。评审失败时租约保持打开。
 
+标签记录 `used.skills`，即该轮次或其子 agent 加载过的团队技能。判定方式与[会话](#为会话评分)相同，依据该轮次开始时检出目录中由 teamai 交付并未经修改的技能。`workflow:` 步骤的标签列出其子轮次记录的全部技能。若子轮次都未记录，标签没有 `used`。
+
 证据目录包含 `evidence.json`、`prompt.md`、有记录范围时的 `diff.patch`、`repo/`（被评判提交中的跟踪文件，符号链接的目标以文本保存）、`transcripts/`（包含可读取的子代理）和 `outputs.json`。所有文件都经过脱敏，团队在 `env/secrets.yaml` 中声明的密钥值也会被遮蔽。不是文本的跟踪文件不会写入，并列在 `omitted` 里。缺失证据以 gap 代码列出。租约结算或过期后删除证据。
 
 ## 任意 driver
@@ -116,6 +118,14 @@ JSON
 
 评分器未列出的标签会被拒绝，租约保持打开。`running` 列出你仍在评判的租约，从而续期；租约在领取或续期 30 分钟后过期。不要把评审租约放进 `workflow next` 的 `running`。所有字段见 `teamai score --help`。
 
+你的 driver 在上报一个轮次时写明它加载过的团队技能，该轮次的标签会带上它们：
+
+```console
+$ teamai workflow report r3f9… --json '{"attempt":"…","revision":3,"outcome":"success","driver":{…},"used":{"skills":["review-notes"]}}'
+```
+
+只写名字：不是技能名的值（例如路径）会被丢弃。上报中没有 `used` 时，标签也没有；`"skills":[]` 表示该轮次没有加载团队技能。
+
 ## 按需评分
 
 ```console
@@ -124,6 +134,23 @@ $ teamai score --run r3f9… --step review --pass 2 --scorer review-quality --qu
 ```
 
 不应用抽样，失败或过期的评审任务会重新打开。运行固定过的评分器使用固定的评分标准；`teamai pull` 缓存的其他评分器使用当前版本。不加 `--queue` 时，运行 PATH 上首个可用的评审工具，优先使用执行该轮的工具。未知的运行、步骤、执行轮次或评分器会失败，并列出存在的值。若本机没有评审工具能运行某个评分器的模型，该评分器以 `judge_model_unavailable` 失败并保持打开。错误的 `labels` 列出其他评分器已生成的标签。
+
+## 为会话评分
+
+```console
+$ teamai score --scorer review-quality          # 在 agent 会话内：为该会话评分
+ℹ Scoring claude-code session 7c1e… in /work/app
+ℹ First prompt: Add retries to the client
+ℹ review-quality: bad (score 0, did not pass). Reasoning: ~/.teamai/scores/reasoning/9f2c….md
+ℹ To share what went wrong, ask your agent to read ~/.teamai/scores/reasoning/9f2c….md and share it with the team (teamai contribute --session-id 7c1e…).
+$ teamai score --session 7c1e… --source codex --scorer review-quality --push
+```
+
+在会话外运行时，传入 `--session <id>`。评分从不猜测会话。`--source` 使用 `teamai session migrate --source` 的平台名。`CLAUDE_CODE_SESSION_ID` 等 agent 会话环境变量或会话的捕获记录只指向一个平台时，可以省略。评审者读取脱敏后的会话及其子 agent 的记录，不应用抽样。
+
+评审者最多读取会话的 200,000 个字符。会话评分器指定更便宜的[模型别名](#选择评审者的模型)，长会话的评审成本也会更低。
+
+无论在哪个目录评分，标签都保存在会话所在的作用域。标签记录 `agent`，即会话启动时的运行配置，来自会话启动 hook 写入的捕获记录。标签还记录 `used.skills`，即会话或其子 agent 加载过、且捕获记录显示会话启动时（包括启动时那次 pull）由 teamai 交付并未经修改的团队技能。之后的 pull 不会改变它。捕获记录无法确认来源的技能不记录，例如与团队技能同名的成员自有技能。`--push` 发布该作用域所有待发布的标签。关闭[用量上报](reporting.md)时，它输出 `Usage reporting is off, so labels stay on this machine.`，标签继续待发布。http 团队仓库没有 `teamai-reports`，因此 `--push` 以 `unsupported_repo` 失败，标签留在本机。有标签等待发布时，`teamai doctor` 会给出警告。
 
 ## 批量评审
 
@@ -178,6 +205,7 @@ Judge tools here: claude 2.1.308 (Claude Code) is verified, codebuddy 2.3.0 is b
 | `<dataHome>/scores/labels.jsonl` | 本机的所有标签。 |
 | `<dataHome>/scores/reasoning/` | 评审者的理由，每个标签一个文件。从不发布。 |
 | `<dataHome>/scores/raw/` | 本机评审失败时的输出，保留到之后的评审尝试取代它。 |
-| `teamai-reports` 上的 `scores/<member>/<YYYY-MM>.jsonl` | 已发布的标签，每个评分器、评分标准、执行轮次和评审类型只保留最新一条。推送成功前标签留在 `<dataHome>/scores/pending/`；关闭用量上报时一直留在那里。 |
+| `<dataHome>/sessions/captures/` | 每个会话启动时的运行配置，由会话启动 hook 写入。会话文件消失一天后删除。 |
+| `teamai-reports` 上的 `scores/<member>/<YYYY-MM>.jsonl` | 已发布的标签，每个评分器、评分标准、评分对象和评审类型只保留最新一条。推送成功前标签留在 `<dataHome>/scores/pending/`；关闭用量上报时一直留在那里。 |
 
 标签从不进入运行或它的记录。工作流运行页面显示每一轮的标签，以及评审开销，与运行本身的 token 分开统计。本机的运行统计每一次评审尝试；成员发布的运行只统计产生了标签的评审。
