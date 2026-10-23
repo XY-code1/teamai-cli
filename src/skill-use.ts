@@ -4,6 +4,7 @@
  *
  *   post-tool-use  the tool's skill tool (TOOLS[tool].skillLoad.calls) by name,
  *                  or a read of a SKILL.md under a skill root (classifyToolCall),
+ *                  also by one reader of a longer shell command (namedReads),
  *                  or OMP's `read skill://<name>`
  *   prompt-submit  a mention: `/name` at the start, Codex `$name`, or the
  *                  `<skill>` block Pi expands `/skill:name` into
@@ -13,11 +14,15 @@
  * recorded.
  */
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { collectTeamRepoSkills } from './agent-skills.js';
 import { sanitizeSessionId } from './contribute-check.js';
 import { resolveMemberToolRoots } from './config.js';
-import type { ContentBlock, Message } from './session-flow/ir.js';
+import { recordedUnchanged, type DeliveredHashes } from './resources/delivered-copies.js';
+import type { SubagentsRead } from './session-flow/adapters/base.js';
+import type { ContentBlock, Message, Session } from './session-flow/ir.js';
 import { typedText } from './session-flow/title.js';
 import { isToolId, TOOLS, type SkillLoad } from './tools.js';
 import { SKILL_NAME_CHARS, type LocalConfig } from './types.js';
@@ -31,15 +36,18 @@ import {
   skillRoots,
   updateKnownSkills,
 } from './usage-tracker.js';
-import { readJson, writeJson } from './utils/fs.js';
+import { resolvePath } from './utils/agent-path.js';
+import { pathExists, readJson, writeJson } from './utils/fs.js';
 import { getUserHome } from './utils/home.js';
 import { resolveHookCwd } from './utils/hook-cwd.js';
 import { log } from './utils/logger.js';
 import { deriveSessionId } from './utils/session-id.js';
+import { namedReads } from './utils/shell-command.js';
 import { classifyToolCall } from './utils/tool-call.js';
 import { normalizeToolName } from './utils/tool-names.js';
 
-type Candidate = { readonly skill: string; readonly file?: string };
+/** A skill a hook event or a recorded session shows loaded, by name, and the SKILL.md it read when it read one. */
+export type SkillCandidate = { readonly skill: string; readonly file?: string };
 
 /** The built-in that carried skill tracking before #1221: a team that disables it keeps tool calls uncounted. */
 const RETIRED_SKILL_HOOK_KEY = 'Hook dispatch post-tool-use Skill';
@@ -72,7 +80,7 @@ function isSkillCall(tool: string, hostName: string): boolean {
 }
 
 /** The skills one PostToolUse payload shows loaded, before the existence gate. */
-function toolCallCandidates(stdin: Record<string, unknown>, tool: string): Candidate[] {
+function toolCallCandidates(stdin: Record<string, unknown>, tool: string): SkillCandidate[] {
   const hostName = typeof stdin.tool_name === 'string' ? stdin.tool_name : '';
   const input = asObject(stdin.tool_input);
   if (!hostName || !input) return [];
@@ -83,10 +91,13 @@ function toolCallCandidates(stdin: Record<string, unknown>, tool: string): Candi
   const load = skillLoadOf(tool);
   if (load === undefined || load === 'unknown') return [];
   const call = classifyToolCall(stdin, tool);
-  if (call.category !== 'read' || call.status === 'failure') return [];
-  const uri = typeof input.path === 'string' ? SKILL_URI.exec(input.path.trim()) : null;
+  if (call.status === 'failure') return [];
+  const uri = call.category === 'read' && typeof input.path === 'string' ? SKILL_URI.exec(input.path.trim()) : null;
   if (uri) return [{ skill: uri[1] }];
-  return call.paths.flatMap((file) => {
+  const cwd = resolveHookCwd(stdin);
+  const files = call.category === 'read' ? call.paths : call.command === undefined ? []
+    : namedReads(call.command, { powershell: normalizeToolName(hostName).toLowerCase() === 'powershell', home: getUserHome() }).map((file) => resolvePath(file, cwd));
+  return files.flatMap((file) => {
     const match = SKILL_MD.exec(file);
     return match ? [{ skill: match[1], file }] : [];
   });
@@ -98,7 +109,7 @@ function promptFormOf(tool: string): '$name' | 'skill-block' | '/name' {
 }
 
 /** The skills a prompt mentions, before the existence gate. */
-function promptCandidates(prompt: string, tool: string): Candidate[] {
+function promptCandidates(prompt: string, tool: string): SkillCandidate[] {
   const form = promptFormOf(tool);
   let pattern: RegExp;
   switch (form) {
@@ -127,8 +138,38 @@ export function typedIn(message: Message, block: ContentBlock): string {
   return block.type === 'text' && message.role === 'user' && !message.metadata?.isMeta ? typedText(block.text) : '';
 }
 
+/** A command Codex code mode runs: a string literal `cmd` its JavaScript passes to `tools.exec_command`. */
+const CODE_MODE_COMMAND = /\btools\.exec_command\(\s*\{\s*cmd\s*:\s*("(?:[^"\\\n]|\\.)*")/g;
+
+/** The commands a Codex code-mode script passes as string literals, each as its hook sends it, as `Bash`. */
+function codeModeEvents(script: string, cwd: string): Array<Record<string, unknown>> {
+  return [...script.matchAll(CODE_MODE_COMMAND)].flatMap((match) => {
+    try {
+      const command: unknown = JSON.parse(match[1]);
+      return typeof command === 'string' ? [{ tool_name: 'Bash', tool_input: { command }, cwd }] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/**
+ * The hook events a block of a session message stands for: a tool call as PostToolUse sends it, or a prompt the member
+ * typed as UserPromptSubmit sends it. Codex records a command as `cmd`, and its hook sends `command`. A Codex code-mode
+ * `exec` is recorded as one script, and its hook sends each command the script runs.
+ */
+function hookEventsOf(message: Message, block: ContentBlock, cwd: string): Array<Record<string, unknown>> {
+  if (block.type === 'tool_call') {
+    const input = block.arguments;
+    if (block.toolName === 'exec' && typeof input.input === 'string') return codeModeEvents(input.input, cwd);
+    return [{ tool_name: block.toolName, tool_input: typeof input.cmd === 'string' && input.command === undefined ? { ...input, command: input.cmd } : input, cwd }];
+  }
+  const prompt = typedIn(message, block);
+  return prompt ? [{ prompt, cwd }] : [];
+}
+
 /** The candidates that name an installed skill, each once. */
-async function installedSkills(candidates: Candidate[], stdin: Record<string, unknown>, tool: string, config: LocalConfig, source: 'prompt' | 'tool-call'): Promise<string[]> {
+async function installedSkills(candidates: SkillCandidate[], stdin: Record<string, unknown>, tool: string, config: LocalConfig, source: 'prompt' | 'tool-call'): Promise<string[]> {
   const named = candidates.filter((c) => isValidSkillName(c.skill));
   if (!named.length) return [];
   const hookCwd = resolveHookCwd(stdin);
@@ -148,6 +189,68 @@ async function installedSkills(candidates: Candidate[], stdin: Record<string, un
     else log.debug(`"${skill}" is not an installed skill, so its use is not tracked`);
   }
   return [...skills];
+}
+
+/**
+ * The skills one hook event shows loaded, before any check that they exist: a tool call as PostToolUse sends it, or a
+ * prompt as UserPromptSubmit sends it.
+ */
+export function skillCandidates(event: Record<string, unknown>, tool: string): SkillCandidate[] {
+  return typeof event.prompt === 'string' ? promptCandidates(event.prompt, tool) : toolCallCandidates(event, tool);
+}
+
+/**
+ * The team skills a checkout holds as teamai delivered them, by name: each SKILL.md under a skill root seen from `cwd`
+ * whose bytes are the ones `delivered` records, of a skill the team repo has. A name that also has a copy teamai did not
+ * deliver, or one changed since, is left out, since which copy a tool loads is not known.
+ */
+export async function deliveredTeamSkills(config: LocalConfig, cwd: string, delivered: DeliveredHashes): Promise<Record<string, string[]>> {
+  const team = await collectTeamRepoSkills(config.repo.localPath);
+  const toolRoots = config.toolRoots ?? await resolveMemberToolRoots(cwd);
+  const copies = new Map<string, string[]>();
+  const others = new Set<string>();
+  for (const root of await skillRoots({ config, toolRoots, hookCwd: cwd })) {
+    for (const name of await fs.readdir(root).catch(() => [])) {
+      const file = path.join(root, name, 'SKILL.md');
+      if (!team.has(name) || !await pathExists(file)) continue;
+      if (await recordedUnchanged(delivered, file)) copies.set(name, [...copies.get(name) ?? [], file]);
+      else others.add(name);
+    }
+  }
+  return Object.fromEntries([...copies].filter(([name]) => !others.has(name)));
+}
+
+/**
+ * The skills of `candidates` that a session's record of the team skills its checkout delivered holds: by name, and for
+ * a read, only one of the recorded files. Today's files and team repo play no part, so a later pull changes nothing.
+ */
+export function recordedTeamSkills(candidates: readonly SkillCandidate[], teamSkills: Readonly<Record<string, readonly string[]>>, cwd: string): string[] {
+  const credited = new Set<string>();
+  for (const { skill, file } of candidates) {
+    const files = Object.hasOwn(teamSkills, skill) ? teamSkills[skill] : undefined;
+    if (files && (file === undefined || files.some((recorded) => path.resolve(recorded) === path.resolve(cwd, file)))) credited.add(skill);
+  }
+  return [...credited];
+}
+
+/**
+ * The team skills a session or its subagents loaded, found in their messages by the rules the skill-use hooks apply to
+ * their events, and credited only by `teamSkills`, the record of what its checkout delivered (`deliveredTeamSkills`).
+ */
+export function usedSkills(tool: string, found: { session: Session; subagents?: SubagentsRead }, teamSkills: Readonly<Record<string, readonly string[]>>): string[] {
+  const subagents = found.subagents?.status === 'read' ? found.subagents.agents.map((agent) => agent.session) : [];
+  const used = new Set<string>();
+  for (const session of [found.session, ...subagents]) {
+    const failed = new Set(session.messages.flatMap((message) => message.content.flatMap((block) => block.type === 'tool_result' && block.isError ? [block.callId] : [])));
+    const cwd = session.cwd || found.session.cwd;
+    for (const message of session.messages) {
+      for (const block of message.content) {
+        const events = block.type === 'tool_call' && failed.has(block.callId) ? [] : hookEventsOf(message, block, cwd);
+        for (const event of events) for (const skill of recordedTeamSkills(skillCandidates(event, tool), teamSkills, cwd)) used.add(skill);
+      }
+    }
+  }
+  return [...used].sort();
 }
 
 // ─── Once per session turn ──────────────────────────────

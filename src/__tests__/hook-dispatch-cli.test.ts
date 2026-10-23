@@ -342,6 +342,7 @@ describe('hookDispatchCli', () => {
       return { on: vi.fn(), stdin: { on: vi.fn(), end: vi.fn((raw: string, done: () => void) => { detachedPayload = raw; done(); }) }, unref: vi.fn() };
     });
     const originalCwd = process.cwd();
+    vi.stubEnv('HOME', path.join(root, 'home'));
 
     try {
       await hookDispatchCli('session-start', 'claude', '*', { stdinFile });
@@ -351,6 +352,7 @@ describe('hookDispatchCli', () => {
       expect(JSON.parse(detachedPayload).teamai_git_at_start).toEqual({ head: agent.project.commit, dirty: agent.project.dirty });
     } finally {
       process.chdir(originalCwd);
+      vi.unstubAllEnvs();
       resolveConfig.mockRestore();
       mockSpawn.mockReset();
       fs.rmSync(root, { recursive: true, force: true });

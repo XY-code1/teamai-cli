@@ -623,4 +623,232 @@ describe('teamai score --session', () => {
       expect(label && 'agent' in label ? label.agent?.model : undefined).toEqual({ requested: 'claude-x' });
     });
   });
+
+  describe('the team skills a session used', () => {
+    /** A capture of the session recording the team skills its checkout delivered, as `deliveredTeamSkills` does. */
+    function captureTeamSkills(platform: string, sessionId: string, teamSkills: Record<string, string[]>): void {
+      const dir = path.join(root, 'data', 'sessions', 'captures', platform, sessionId);
+      fs.mkdirSync(dir, { recursive: true });
+      const captureId = '0b6f2a52-5d7e-4c7e-9a43-6a3c1d0e2f10';
+      fs.writeFileSync(path.join(dir, `${captureId}.json`), JSON.stringify({
+        captureId, platform, sessionId, capturedAt: '2026-10-20T10:00:00.000Z', agent: { v: 1, tool: { name: 'claude' }, teamai: '1.0.0', driver: 'session' }, teamSkills,
+      }));
+    }
+
+    /** `team` in the team repo, `installed` in the checkout, and a capture recording the team ones installed as delivered. */
+    function plantSkills(cwd: string, config: LocalConfig, team: string[], installed: string[]): void {
+      for (const name of team) writeSkill(path.join(config.repo.localPath, 'skills', name));
+      for (const name of installed) writeSkill(path.join(cwd, '.claude', 'skills', name));
+      captureTeamSkills('claude-code', SESSION, Object.fromEntries(team.filter((name) => installed.includes(name)).map((name) => [name, [path.join(cwd, '.claude', 'skills', name, 'SKILL.md')]])));
+    }
+
+    function writeSkill(dir: string): void {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${path.basename(dir)}\ndescription: d\n---\nbody\n`);
+    }
+
+    function appendCalls(file: string, cwd: string, calls: Array<{ name: string; input: Record<string, unknown> }>, sidechain = false): void {
+      fs.appendFileSync(file, calls.map((call, index) => line({
+        type: 'assistant', uuid: `c${index}`, parentUuid: 'u2', cwd, sessionId: SESSION, timestamp: '2026-10-20T10:00:02.000Z', ...(sidechain ? { isSidechain: true } : {}),
+        message: { role: 'assistant', model: 'claude-x', content: [{ type: 'tool_use', id: `toolu_${index}`, name: call.name, input: call.input }] },
+      })).join(''));
+    }
+
+    async function usedBy(config: LocalConfig): Promise<unknown> {
+      fakeClaude('good');
+      data(await scoreSession(config, { session: SESSION, source: 'claude-code', scorers: ['quality'] }));
+      const [label] = parseScoreLabels(fs.readFileSync(path.join(root, 'data', 'scores', 'labels.jsonl'), 'utf8'));
+      return label && 'used' in label ? label.used : undefined;
+    }
+
+    it('names a team skill loaded through the skill tool and one whose SKILL.md was read, and no skill outside the team repo', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantClaudeSession(cwd, 'Review the change');
+      plantSkills(cwd, config, ['review', 'deploy'], ['review', 'deploy', 'mine']);
+      appendCalls(path.join(mocks.home, '.claude', 'projects', encodeCwdClaude(cwd), `${SESSION}.jsonl`), cwd, [
+        { name: 'Skill', input: { skill: 'review' } },
+        { name: 'Read', input: { file_path: path.join(cwd, '.claude', 'skills', 'deploy', 'SKILL.md') } },
+        { name: 'Skill', input: { skill: 'mine' } },
+      ]);
+
+      expect(await usedBy(config)).toEqual({ skills: ['deploy', 'review'] });
+    });
+
+    it('still names a team skill the session loaded after a later pull removed it from the team repo and the checkout', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantClaudeSession(cwd, 'Review the change');
+      plantSkills(cwd, config, ['review'], ['review']);
+      appendCalls(path.join(mocks.home, '.claude', 'projects', encodeCwdClaude(cwd), `${SESSION}.jsonl`), cwd, [{ name: 'Skill', input: { skill: 'review' } }]);
+      fs.rmSync(path.join(config.repo.localPath, 'skills', 'review'), { recursive: true });
+      fs.rmSync(path.join(cwd, '.claude', 'skills', 'review'), { recursive: true });
+
+      expect(await usedBy(config)).toEqual({ skills: ['review'] });
+    });
+
+    it('names no skill its captures did not record as delivered, though the team repo has one of its name', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantClaudeSession(cwd, 'Review the change');
+      plantSkills(cwd, config, ['review'], ['review']);
+      captureTeamSkills('claude-code', SESSION, {});
+      appendCalls(path.join(mocks.home, '.claude', 'projects', encodeCwdClaude(cwd), `${SESSION}.jsonl`), cwd, [{ name: 'Skill', input: { skill: 'review' } }]);
+
+      expect(await usedBy(config)).toEqual({ skills: [] });
+      fs.rmSync(path.join(root, 'data', 'sessions'), { recursive: true });
+      expect(await usedBy(config)).toEqual({ skills: [] });
+    });
+
+    it('names a team skill read from its SKILL.md only when the read was the copy teamai delivered', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantClaudeSession(cwd, 'Review the change');
+      plantSkills(cwd, config, ['review'], ['review']);
+      writeSkill(path.join(mocks.home, '.claude', 'skills', 'review'));
+      appendCalls(path.join(mocks.home, '.claude', 'projects', encodeCwdClaude(cwd), `${SESSION}.jsonl`), cwd, [
+        { name: 'Read', input: { file_path: path.join(mocks.home, '.claude', 'skills', 'review', 'SKILL.md') } },
+      ]);
+
+      expect(await usedBy(config)).toEqual({ skills: [] });
+    });
+
+    it('names a team skill the member typed as /name', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantClaudeSession(cwd, '<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>the retry change</command-args>');
+      plantSkills(cwd, config, ['review'], ['review']);
+
+      expect(await usedBy(config)).toEqual({ skills: ['review'] });
+    });
+
+    async function usedByCodex(config: LocalConfig, cwd: string, items: unknown[]): Promise<unknown> {
+      const id = '019a0000-0000-7000-8000-0000000000bb';
+      const day = path.join(mocks.home, '.codex', 'sessions', '2026', '10', '20');
+      fs.mkdirSync(day, { recursive: true });
+      fs.writeFileSync(path.join(day, `rollout-2026-10-20T12-00-00-${id}.jsonl`), [
+        { type: 'session_meta', payload: { id, timestamp: '2026-10-20T10:00:00.000Z', cwd, originator: 'codex_cli_rs', cli_version: '0.163.0' } },
+        ...items.map((payload) => ({ type: 'response_item', payload })),
+      ].map((record) => line({ timestamp: '2026-10-20T10:00:01.000Z', ...record })).join(''));
+      fakeClaude('good');
+      data(await scoreSession(config, { session: id, source: 'codex', scorers: ['quality'] }));
+      const [label] = parseScoreLabels(fs.readFileSync(path.join(root, 'data', 'scores', 'labels.jsonl'), 'utf8'));
+      return label && 'used' in label ? label.used : undefined;
+    }
+
+    it('names a team skill a Codex prompt mentions as $name', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantSkills(cwd, config, ['review'], []);
+      writeSkill(path.join(cwd, '.agents', 'skills', 'review'));
+      captureTeamSkills('codex', '019a0000-0000-7000-8000-0000000000bb', { review: [path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')] });
+
+      expect(await usedByCodex(config, cwd, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check the retries with $review' }] }]))
+        .toEqual({ skills: ['review'] });
+    });
+
+    it('names a team skill whose SKILL.md a Codex command read', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantSkills(cwd, config, ['review'], []);
+      writeSkill(path.join(cwd, '.agents', 'skills', 'review'));
+      captureTeamSkills('codex', '019a0000-0000-7000-8000-0000000000bb', { review: [path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')] });
+      const cmd = `sed -n '1,240p' ${path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')}`;
+
+      expect(await usedByCodex(config, cwd, [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check the retries' }] },
+        { type: 'function_call', name: 'exec_command', call_id: 'call_1', arguments: JSON.stringify({ cmd, yield_time_ms: 1000 }) },
+      ])).toEqual({ skills: ['review'] });
+    });
+
+    it('names a team skill whose SKILL.md one line of a multi-line Codex command read', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantSkills(cwd, config, ['review'], []);
+      writeSkill(path.join(cwd, '.agents', 'skills', 'review'));
+      captureTeamSkills('codex', '019a0000-0000-7000-8000-0000000000bb', { review: [path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')] });
+      const cmd = [
+        `sed -n '1,260p' ${path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')}`,
+        `rg -n -i "review|gate" ${path.join(mocks.home, '.codex', 'memories', 'MEMORY.md')}`,
+        "sed -n '1,260p' docs/agents/issue-tracker.md",
+        "find .scratch -maxdepth 3 -type f -name '*.md' -print | sort",
+      ].join('\n');
+
+      expect(await usedByCodex(config, cwd, [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check the retries' }] },
+        { type: 'function_call', name: 'exec_command', call_id: 'call_1', arguments: JSON.stringify({ cmd, workdir: cwd, yield_time_ms: 10000, max_output_tokens: 30000 }) },
+      ])).toEqual({ skills: ['review'] });
+    });
+
+    it.each([
+      ['the delivered copy', ['.agents', 'skills', 'review', 'SKILL.md'], ['review']],
+      ['the member\'s own copy', ['.codex', 'skills', 'review', 'SKILL.md'], []],
+    ])('names the team skills whose SKILL.md a Codex code-mode command read: %s', async (_, file, skills) => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantSkills(cwd, config, ['review'], []);
+      writeSkill(path.join(cwd, '.agents', 'skills', 'review'));
+      captureTeamSkills('codex', '019a0000-0000-7000-8000-0000000000bb', { review: [path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')] });
+      const read = path.join(file[0] === '.agents' ? cwd : mocks.home, ...file);
+
+      expect(await usedByCodex(config, cwd, [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check the retries' }] },
+        { type: 'custom_tool_call', status: 'completed', call_id: 'call_1', name: 'exec', input: `text(await tools.exec_command({cmd:${JSON.stringify(`cat ${read}`)},max_output_tokens:10000}));\n` },
+      ])).toEqual({ skills });
+    });
+
+    it('names no team skill the AGENTS.md block Codex injects mentions as $name', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantSkills(cwd, config, ['review'], []);
+      writeSkill(path.join(cwd, '.agents', 'skills', 'review'));
+      captureTeamSkills('codex', '019a0000-0000-7000-8000-0000000000bb', { review: [path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')] });
+
+      expect(await usedByCodex(config, cwd, [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: `# AGENTS.md instructions for ${cwd}\n\n<INSTRUCTIONS>\nUse $review when reviewing code.\n</INSTRUCTIONS>` }] },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Say hello' }] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hello' }] },
+      ])).toEqual({ skills: [] });
+    });
+
+    it('names no team skill and prints no first prompt from a command record inside the AGENTS.md block Codex injects', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantSkills(cwd, config, ['review'], []);
+      writeSkill(path.join(cwd, '.agents', 'skills', 'review'));
+      captureTeamSkills('codex', '019a0000-0000-7000-8000-0000000000bb', { review: [path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')] });
+      const printed = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      expect(await usedByCodex(config, cwd, [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: `# AGENTS.md instructions for ${cwd}\n\n<INSTRUCTIONS>\nExample Claude record:\n<command-name>/check</command-name>\n<command-args>Use $review for changes</command-args>\n</INSTRUCTIONS>` }] },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Say hello' }] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hello' }] },
+      ])).toEqual({ skills: [] });
+      expect(printed.mock.calls.map((call) => call.join(' ')).join('\n')).toContain('First prompt: Say hello');
+    });
+
+    it('scores the rest of a Codex session whose recorded call has arguments that are not an object', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantSkills(cwd, config, ['review'], []);
+      writeSkill(path.join(cwd, '.agents', 'skills', 'review'));
+      captureTeamSkills('codex', '019a0000-0000-7000-8000-0000000000bb', { review: [path.join(cwd, '.agents', 'skills', 'review', 'SKILL.md')] });
+
+      expect(await usedByCodex(config, cwd, [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check the retries with $review' }] },
+        { type: 'function_call', name: 'exec_command', call_id: 'call_1', arguments: 'null' },
+      ])).toEqual({ skills: ['review'] });
+    });
+
+    it('names a team skill only a subagent loaded', async () => {
+      const config = await fixture();
+      const cwd = path.join(root, 'app');
+      plantClaudeSession(cwd, 'Review the change');
+      plantSubagentEdit(cwd);
+      plantSkills(cwd, config, ['review'], ['review']);
+      appendCalls(path.join(mocks.home, '.claude', 'projects', encodeCwdClaude(cwd), SESSION, 'subagents', 'agent-a.jsonl'), cwd, [{ name: 'Skill', input: { skill: 'review' } }], true);
+
+      expect(await usedBy(config)).toEqual({ skills: ['review'] });
+    });
+  });
 });

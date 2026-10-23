@@ -621,7 +621,8 @@ export class CodexAdapter extends AgentAdapter {
           arguments_ = { input: payload.input };
         } else {
           try {
-            arguments_ = typeof argsRaw === 'string' ? JSON.parse(argsRaw) : (argsRaw as Record<string, unknown>) ?? {};
+            const decoded: unknown = typeof argsRaw === 'string' ? JSON.parse(argsRaw) : argsRaw ?? {};
+            arguments_ = typeof decoded === 'object' && decoded !== null && !Array.isArray(decoded) ? { ...decoded } : { _raw: String(argsRaw) };
           } catch {
             arguments_ = { _raw: String(argsRaw) };
           }

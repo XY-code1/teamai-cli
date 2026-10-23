@@ -67,7 +67,14 @@ const LabelFields = {
 /** Unknown keys are dropped, so a label a newer teamai wrote still reads here. */
 export const ScoreLabelSchema = z.discriminatedUnion('source', [
   z.object({ ...LabelFields, source: z.literal('workflow'), subject: RunSubjectSchema }),
-  z.object({ ...LabelFields, source: z.literal('session'), subject: SessionSubjectSchema, agent: AgentObservationSchema.optional() }),
+  z.object({
+    ...LabelFields,
+    source: z.literal('session'),
+    subject: SessionSubjectSchema,
+    agent: AgentObservationSchema.optional(),
+    /** The team skills the session or its subagents loaded. */
+    used: z.object({ skills: z.array(z.string().min(1)) }).optional(),
+  }),
 ]);
 export type ScoreLabel = z.infer<typeof ScoreLabelSchema>;
 
