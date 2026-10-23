@@ -13,7 +13,7 @@ import {
   type AgentSpec,
   type ToolName,
 } from '../resources/agent-format.js';
-import { observeLaunch } from '../agent-observation.js';
+import { observeLaunch, type Used } from '../agent-observation.js';
 import { detectProjectConfig } from '../config.js';
 import { acquireLock, releaseLock } from '../update.js';
 import { commandSignalPolicy, exitLike, terminalReachesCommand } from '../env-exec.js';
@@ -23,6 +23,7 @@ import { readFileSafe, readJson, writeJsonAtomic } from '../utils/fs.js';
 import { log } from '../utils/logger.js';
 import { AgentSession } from '../session-flow/agent-session.js';
 import { openSessionArchive, type SessionArchive } from '../session-flow/archive.js';
+import { deliveredTeamSkills, usedSkills } from '../skill-use.js';
 import { interactiveHitlRequired, leaseNext, reportAttempt } from './engine.js';
 import { respondToHitl } from './run-controls.js';
 import { isRecord } from './expression.js';
@@ -714,6 +715,17 @@ async function commandReport(attemptResultPath: string, driver: DriverIdentity, 
   };
 }
 
+/**
+ * The team skills the pass's session and its subagents loaded, credited by `teamSkills`, what its checkout held as
+ * delivered at launch. Undefined when the session cannot be read.
+ */
+async function usedInSession(tool: LaunchTool, sessionId: string, cwd: string, teamSkills: Record<string, string[]>): Promise<Used | undefined> {
+  const platform = AgentSession.platformForTool(tool);
+  if (!platform) return undefined;
+  const found = await AgentSession.find({ platform, sessionId, cwd }, { subagents: true }).catch(() => undefined);
+  return found?.status === 'done' ? { skills: usedSkills(AgentSession.toolForPlatform(platform), found, teamSkills) } : undefined;
+}
+
 async function promptReport(
   config: LocalConfig,
   attemptResultPath: string,
@@ -761,17 +773,22 @@ async function promptReport(
   const definitionModel = chosen.model && chosen.by === 'definition'
     ? { model: chosen.model.name, ...(chosen.model.effort ? { effort: chosen.model.effort } : {}) }
     : {};
-  const [observed, launch] = await Promise.all([
+  const { teamDelivery } = await import('../pull.js');
+  const delivery = await teamDelivery(stepConfig, selected).catch(() => undefined);
+  const delivered = delivery?.record?.delivered;
+  const [observed, launch, teamSkills] = await Promise.all([
     observeLaunch({
       config: stepConfig,
       tool: selected,
       cwd,
+      delivery: delivery ?? null,
       ...(lease.agent && loaded ? { definition: { stem: lease.agent, file: loaded.file, ...definitionModel } } : {}),
       ...(chosen.model && chosen.by !== 'definition'
         ? { chosen: { model: chosen.model.name, ...(chosen.model.effort ? { effort: chosen.model.effort } : {}), ...(chosen.alias ? { alias: chosen.alias } : {}) } }
         : {}),
     }),
     workflowLaunch(stepConfig, selected),
+    delivered ? deliveredTeamSkills(stepConfig, cwd, delivered).catch(() => undefined) : undefined,
   ]);
   let result: LocalToolResult;
   try {
@@ -802,6 +819,7 @@ async function promptReport(
   const finished = lease.workspace && !left && !dirtyFailure ? await finishWorkspace(lease, result.failure !== undefined) : {};
   const failure = dirtyFailure ?? finished.failure ?? (result.failure && { ...result.failure, message: withUnpushed(result.failure.message, finished.unpushed) });
   const ran = result.started ? result : undefined;
+  const used = ran?.session && teamSkills ? await usedInSession(selected, ran.session, cwd, teamSkills) : undefined;
   return {
     attempt: lease.attempt,
     revision: lease.revision,
@@ -814,6 +832,7 @@ async function promptReport(
     ...(ran?.output !== undefined ? { outputs: ran.output } : {}),
     // How the definition was handed over is known only once the launch resolved its tool: OpenCode's depends on its major.
     ...(ran ? { agent: ran.applied ? { ...observed, definition: { applied: ran.applied } } : observed } : {}),
+    ...(used ? { used } : {}),
     exitCode: result.exitCode,
     ...(finished.changes ? { changes: finished.changes } : {}),
     ...(left ? { read: left.read } : {}),

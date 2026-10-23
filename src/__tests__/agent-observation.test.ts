@@ -214,6 +214,17 @@ describe('observeLaunch (#1176)', () => {
     });
   });
 
+  it('takes the delivery from the pull record the launch already read, and reads none itself', async () => {
+    const { config, project, rev } = checkout();
+    await recordDelivery(config, { rev: rev.slice(0, 7), targets: ['claude'] });
+    const { teamDelivery } = await import('../pull.js');
+    const read = await teamDelivery(config, 'claude');
+    await recordDelivery(config, { rev: rev.slice(0, 7), targets: ['claude'], withoutSelection: true });
+
+    expect((await observeLaunch({ config, tool: 'claude', cwd: project, delivery: read })).team).toMatchObject({ revision: rev });
+    expect(await observeLaunch({ config, tool: 'claude', cwd: project, delivery: null })).not.toHaveProperty('team');
+  });
+
   it('names no team for a record an older CLI wrote without the selection', async () => {
     const { config, project, rev } = checkout();
     await recordDelivery(config, { rev: rev.slice(0, 7), targets: ['claude'], withoutSelection: true });

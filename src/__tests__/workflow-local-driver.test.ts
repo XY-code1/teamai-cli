@@ -9,6 +9,7 @@ import { loadStateForScope, saveStateForScope } from '../config.js';
 import { checkoutRecordKey, type CheckoutRecord } from '../pull.js';
 import { getAdapter } from '../session-flow/adapters/index.js';
 import { AgentSession } from '../session-flow/agent-session.js';
+import { encodeCwdClaude } from '../session-flow/fs.js';
 import type { Session } from '../session-flow/ir.js';
 import { SyncManager, defaultSyncMeta, getRepoIdentity } from '../session-flow/sync.js';
 import { getReportsDir, type LocalConfig, type TeamaiConfig } from '../types.js';
@@ -507,6 +508,86 @@ ${agent ? `    agent: ${agent}\n` : ''}`;
         driver: 'local',
         fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
       },
+    });
+  });
+
+  describe('the team skills a pass used', () => {
+    const SESSION = 'b0d5e000-0000-4000-8000-0000000000d1';
+    const line = (record: unknown): string => `${JSON.stringify(record)}\n`;
+    const skillCall = (uuid: string, skill: string, sidechain = false): string => line({
+      type: 'assistant', uuid, parentUuid: 'u1', sessionId: SESSION, timestamp: '2026-10-23T10:00:01.000Z', ...(sidechain ? { isSidechain: true } : {}),
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: `toolu_${uuid}`, name: 'Skill', input: { skill } }] },
+    });
+
+    /**
+     * A Claude pass that runs `during`, then writes a session whose main thread loads `main` and whose subagent loads
+     * `subagent` through the skill tool.
+     */
+    const loading = (workspace: string, { main, subagent }: { main: string; subagent: string }, during = () => {}): LocalToolAdapter => ({
+      runInteractive: vi.fn(),
+      run: vi.fn(async () => {
+        during();
+        const project = path.join(os.homedir(), '.claude', 'projects', encodeCwdClaude(workspace));
+        const subagents = path.join(project, SESSION, 'subagents');
+        fs.mkdirSync(subagents, { recursive: true });
+        fs.writeFileSync(path.join(project, `${SESSION}.jsonl`), line({
+          type: 'user', uuid: 'u1', parentUuid: null, cwd: workspace, sessionId: SESSION, timestamp: '2026-10-23T10:00:00.000Z', message: { role: 'user', content: 'Review this project.' },
+        }) + skillCall('m1', main));
+        fs.writeFileSync(path.join(subagents, 'agent-a.meta.json'), JSON.stringify({ toolUseId: 'toolu_m1', spawnDepth: 1 }));
+        fs.writeFileSync(path.join(subagents, 'agent-a.jsonl'), skillCall('s1', subagent, true));
+        return { started: true as const, exitCode: 0, session: SESSION };
+      }),
+    });
+
+    async function usedOf(config: LocalConfig, runId: string): Promise<unknown> {
+      const run = await readRun(config, runId);
+      if (typeof run !== 'object') throw new Error(`run ${runId} is ${run}`);
+      const [step] = run.steps;
+      return step && 'used' in step ? step.used : 'absent';
+    }
+
+    it('records a team skill its subagent loaded that the checkout held as delivered at launch, and not the member\'s own skill', async () => {
+      const { config, workspace, runId } = await observed(reviewStep());
+      commitFile(config.repo.localPath, 'skills/review/SKILL.md');
+      fs.mkdirSync(path.join(workspace, '.claude', 'skills', 'mine'), { recursive: true });
+      fs.writeFileSync(path.join(workspace, '.claude', 'skills', 'mine', 'SKILL.md'), 'Mine.\n');
+
+      await runLocalDriver(config, runId, workspace, { adapter: loading(workspace, { main: 'mine', subagent: 'review' }), toolPaths });
+
+      expect(await usedOf(config, runId)).toEqual({ skills: ['review'] });
+    });
+
+    it('still records a team skill that a pull removed while the pass ran', async () => {
+      const { config, workspace, runId, skill } = await observed(reviewStep());
+      commitFile(config.repo.localPath, 'skills/review/SKILL.md');
+      const pulled = () => {
+        fs.rmSync(path.join(config.repo.localPath, 'skills'), { recursive: true });
+        fs.rmSync(path.dirname(skill), { recursive: true });
+      };
+
+      await runLocalDriver(config, runId, workspace, { adapter: loading(workspace, { main: 'review', subagent: 'review' }, pulled), toolPaths });
+
+      expect(await usedOf(config, runId)).toEqual({ skills: ['review'] });
+    });
+
+    it('records no skill whose copy in the checkout is not the one teamai delivered, though the team has one of its name', async () => {
+      const { config, workspace, runId, skill } = await observed(reviewStep());
+      commitFile(config.repo.localPath, 'skills/review/SKILL.md');
+      fs.writeFileSync(skill, 'Review my way.\n');
+
+      await runLocalDriver(config, runId, workspace, { adapter: loading(workspace, { main: 'review', subagent: 'review' }), toolPaths });
+
+      expect(await usedOf(config, runId)).toEqual({ skills: [] });
+    });
+
+    it('records nothing for a checkout no pull delivered to', async () => {
+      const { config, workspace, runId } = await workflowFixture(reviewStep());
+      fs.mkdirSync(path.join(config.repo.localPath, 'skills', 'review'), { recursive: true });
+      fs.writeFileSync(path.join(config.repo.localPath, 'skills', 'review', 'SKILL.md'), 'Review carefully.\n');
+
+      await runLocalDriver(config, runId, workspace, { adapter: loading(workspace, { main: 'review', subagent: 'review' }), toolPaths });
+
+      expect(await usedOf(config, runId)).toBe('absent');
     });
   });
 

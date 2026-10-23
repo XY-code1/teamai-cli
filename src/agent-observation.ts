@@ -18,6 +18,7 @@ import { getCurrentVersion } from './package-info.js';
 import { recordedUnchanged } from './resources/delivered-copies.js';
 import { DeliverySelectionSchema, SKILL_NAME_REGEX, type LocalConfig } from './types.js';
 import { getHeadState, type HeadState } from './utils/git.js';
+import type { TeamDelivery } from './pull.js';
 
 /**
  * A model as a driver reports it, such as `claude-sonnet-4.6` or `anthropic/claude-sonnet-4.6@2026`. A report is free
@@ -111,6 +112,8 @@ export type ToolLaunch = {
   beforeOwnPull?: boolean;
   /** The checkout's git state when the launch already read it, null when it found none; read here otherwise. */
   head?: HeadState | null;
+  /** The checkout's pull record when the launch already read it (`teamDelivery`), null when it found none; read here otherwise. */
+  delivery?: TeamDelivery | null;
 };
 
 /** Observe a launch before the tool starts. Never throws: each field it cannot observe is left out. */
@@ -123,7 +126,7 @@ export async function observeLaunch(launch: ToolLaunch): Promise<ReportedAgent> 
 export async function observeCheckout(launch: ToolLaunch): Promise<ReportedAgent> {
   const { teamDelivery } = await import('./pull.js');
   const [delivery, head] = await Promise.all([
-    teamDelivery(launch.config, launch.tool, { beforeOwnPull: launch.beforeOwnPull }).catch(() => undefined),
+    launch.delivery !== undefined ? launch.delivery : teamDelivery(launch.config, launch.tool, { beforeOwnPull: launch.beforeOwnPull }).catch(() => undefined),
     launch.head !== undefined ? launch.head : getHeadState(launch.cwd).catch(() => null),
   ]);
   const record = delivery?.record;
