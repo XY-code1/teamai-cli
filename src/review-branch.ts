@@ -30,10 +30,13 @@ import { resolveConfigForDir } from './config.js';
 import { caseFoldKey, isSafeNamespaceSegment, NAMESPACE_RULE } from './manifest-schema.js';
 import { loadProjectsManifest, type ProjectResourceType, type ProjectsManifest } from './projects.js';
 import { NAMESPACE_AXIS, type PlaceableType } from './push-namespaces.js';
-import { parseAgentYaml } from './resources/agent-format.js';
+import { loadFailure } from './doctor-agent-models.js';
+import { isModelAlias, loadTeamModelAliases, noModelCause, resolveAgentModel, resolveModelValue, TEAM_ALIASES_FILE, type ModelAliases } from './models/aliases.js';
+import { ALL_SUPPORTED_TOOLS, parseAgentYaml, type AgentSpec, type ToolName } from './resources/agent-format.js';
 import { AgentsHandler } from './resources/agents.js';
 import { RulesHandler } from './resources/rules.js';
 import { SkillsHandler } from './resources/skills.js';
+import { resolveResourceNamespaces } from './resource-namespaces.js';
 import { loadRolesManifestIfPresent, type RolesManifest } from './roles.js';
 import { LocalConfigSchema, type GlobalOptions, type LocalConfig, type ResourceItem, type TeamaiConfig } from './types.js';
 import { splitFrontmatter } from './utils/frontmatter.js';
@@ -42,8 +45,11 @@ import { getFileContentAtRev, getHeadCommit, listTreeAtRev } from './utils/git.j
 import { isSilent, log, setSilent } from './utils/logger.js';
 import { redact } from './utils/redact.js';
 import { formatUnknownScorer, syncWorkflowDefinitions } from './workflow/cache.js';
-import { formatDiagnostic } from './workflow/parse.js';
-import { formatScorerDiagnostic } from './scorers/definition.js';
+import { formatDiagnostic, parseWorkflow } from './workflow/parse.js';
+import { stepModelUnavailableText } from './workflow/step-model.js';
+import type { WorkflowStep } from './workflow/types.js';
+import { formatScorerDiagnostic, parseScorer } from './scorers/definition.js';
+import { scorerModelUnavailableText } from './scorers/judge-model.js';
 
 // ─── Findings ────────────────────────────────────────────────────────────────
 
@@ -51,7 +57,7 @@ import { formatScorerDiagnostic } from './scorers/definition.js';
 export type FindingLevel = 'fail' | 'warn' | 'info';
 
 /** Which group of checks produced a finding. */
-export type FindingCheck = 'structure' | 'naming' | 'duplicates' | 'format' | 'leaks' | 'workflows' | 'scorers';
+export type FindingCheck = 'structure' | 'naming' | 'duplicates' | 'format' | 'leaks' | 'workflows' | 'scorers' | 'models';
 
 /** One thing worth reporting about the branch. */
 export interface Finding {
@@ -474,6 +480,136 @@ async function workflowFindings(repoDir: string): Promise<Finding[]> {
   }
 }
 
+/** The steps of `definition`, inside its inline workflows too, with each step's path, such as `check.classify`. */
+function stepsOf(definition: { steps: WorkflowStep[] }, prefix = ''): Array<{ path: string; step: WorkflowStep }> {
+  return definition.steps.flatMap((step) => [
+    { path: `${prefix}${step.id}`, step },
+    ...(typeof step.workflow === 'object' ? stepsOf(step.workflow, `${prefix}${step.id}.`) : []),
+  ]);
+}
+
+/** The members of one selection of the branch: no role or project, one role, or one project. */
+interface ModelContext {
+  /** How a finding names these members: `role dev`. */
+  label: string;
+  aliases: ModelAliases;
+  /** The agent namespaces these members receive; null when they receive every one. */
+  agentNamespaces: readonly string[] | null;
+}
+
+async function modelContexts(repoDir: string, roles: RolesManifest | null, projects: ProjectsManifest | null): Promise<ModelContext[]> {
+  const base = reviewTreeConfig(repoDir, os.tmpdir());
+  const selections: Array<{ label: string; config: LocalConfig }> = [
+    { label: 'no role or project', config: base },
+    ...(roles?.roles ?? []).map((role) => ({ label: `role ${role.id}`, config: { ...base, primaryRole: role.id } })),
+    ...(projects?.projects ?? []).map((project) => ({ label: `project ${project.id}`, config: { ...base, projects: [project.id] } })),
+  ];
+  return Promise.all(selections.map(async ({ label, config }) => ({
+    label,
+    aliases: await loadTeamModelAliases(config),
+    agentNamespaces: await resolveResourceNamespaces(config).then((resolved) => resolved?.activeNamespaces.agents ?? null, () => null),
+  })));
+}
+
+function receives(context: ModelContext, namespace: string | undefined): boolean {
+  return namespace === undefined || context.agentNamespaces === null || context.agentNamespaces.some((active) => caseFoldKey(active) === caseFoldKey(namespace));
+}
+
+/** Why `model` gives none of `tools` a model, worded to follow "which", or undefined when it gives one, or is a model name. */
+function valueCause(aliases: ModelAliases, model: string, tools?: readonly ToolName[]): string | undefined {
+  if (!isModelAlias(aliases, model)) return undefined;
+  const resolutions = (tools ?? ALL_SUPPORTED_TOOLS).map((tool) => resolveModelValue(aliases, model, tool));
+  if (resolutions.some((resolution) => resolution.ok && resolution.model !== undefined)) return undefined;
+  return noModelCause(resolutions[0] ?? { ok: true, step: 'default' }, tools?.join(', ') ?? 'any tool');
+}
+
+/** Why `spec` gives none of its target tools a model, as pull resolves it: a tool's extras model first. */
+function agentCause(aliases: ModelAliases, spec: AgentSpec): string | undefined {
+  const tools = spec.targets ?? ALL_SUPPORTED_TOOLS;
+  const resolutions = tools.map((tool) => resolveAgentModel(aliases, spec, tool));
+  if (resolutions.some((resolution) => resolution.ok && resolution.model !== undefined)) return undefined;
+  return noModelCause(resolutions[0] ?? { ok: true, step: 'default' }, spec.targets?.join(', ') ?? 'any tool');
+}
+
+/**
+ * The model aliases the branch's agents, workflow steps, `defaults.model` and scorers ask for that the branch's own
+ * team aliases files map for none of the tools that would use them, or the reason those files cannot be read. Each
+ * role and project the branch declares, and members with neither, receive their own agents and aliases files, so each
+ * is checked on its own and a finding names the ones it is about. Member overrides, model switches and installed
+ * tools are this machine's, so they play no part. A model name is never one.
+ */
+async function modelFindings(repoDir: string, resources: ReviewResource[], readText: (p: string) => Promise<string | null>, roles: RolesManifest | null, projects: ProjectsManifest | null): Promise<Finding[]> {
+  const contexts = await modelContexts(repoDir, roles, projects);
+  const [unselected] = contexts;
+  const failure = unselected && loadFailure(unselected.aliases);
+  if (failure) return [{ level: 'fail', check: 'models', path: TEAM_ALIASES_FILE, message: failure }];
+  const findings: Finding[] = [];
+  const fail = (relativePath: string, message: string) => findings.push({ level: 'fail', check: 'models', path: relativePath, message });
+  const failures = new Map<string, string[]>();
+  for (const context of contexts) {
+    const reason = loadFailure(context.aliases);
+    if (reason) failures.set(reason, [...failures.get(reason) ?? [], context.label]);
+  }
+  for (const [reason, labels] of failures) fail(TEAM_ALIASES_FILE, `${reason} (${labels.join(', ')})`);
+  const readable = contexts.filter((context) => loadFailure(context.aliases) === undefined);
+  /** The cause in the first context `causeIn` finds one, naming the contexts it holds for when the branch has roles or projects. */
+  const unmapped = (among: readonly ModelContext[], causeIn: (context: ModelContext) => string | undefined): string | undefined => {
+    const found = among.flatMap((context) => {
+      const cause = causeIn(context);
+      return cause === undefined ? [] : [{ cause, label: context.label }];
+    });
+    const [first] = found;
+    if (!first) return undefined;
+    return contexts.length === 1 ? first.cause : `${first.cause} (${found.map(({ label }) => label).join(', ')})`;
+  };
+
+  const agents: Array<{ resource: ReviewResource; spec: AgentSpec }> = [];
+  for (const resource of resources) {
+    if (resource.type !== 'agents' || !/\.(yaml|yml)$/i.test(resource.absolutePath)) continue;
+    const content = await readText(resource.absolutePath);
+    const parsed = content === null ? null : parseAgentYaml(content, path.basename(resource.relativePath));
+    if (parsed?.ok) agents.push({ resource, spec: parsed.spec });
+  }
+  for (const { resource, spec } of agents) {
+    if (spec.model === undefined) continue;
+    const cause = unmapped(readable.filter((context) => receives(context, resource.namespace)), (context) => agentCause(context.aliases, spec));
+    if (cause) fail(resource.relativePath, `Agent "${spec.name}" asks for model alias "${spec.model}", which ${cause}. Add one, or remove model from the agent.`);
+  }
+
+  for (const name of (await fse.readdir(path.join(repoDir, 'workflows')).catch(() => [])).filter((file) => file.endsWith('.yaml')).sort()) {
+    const relativePath = `workflows/${name}`;
+    const content = await readText(path.join(repoDir, 'workflows', name));
+    const parsed = content === null ? undefined : parseWorkflow(relativePath, content);
+    if (!parsed?.ok) continue;
+    const defaults = parsed.definition.defaults?.model;
+    for (const { path: stepPath, step } of stepsOf(parsed.definition)) {
+      if (step.prompt === undefined && step.promptFile === undefined) continue;
+      const own = step.model !== undefined;
+      // A run takes `defaults.model` unless the step's agent sets its own; an agent the branch does not have may set one.
+      const model = own ? step.model : defaults;
+      if (model === undefined) continue;
+      const takesModel = (context: ModelContext): boolean => {
+        if (own || step.agent === undefined) return true;
+        const agent = agents.find(({ resource, spec }) => spec.name === step.agent && receives(context, resource.namespace));
+        return agent !== undefined && agent.spec.model === undefined;
+      };
+      const cause = unmapped(readable.filter(takesModel), (context) => valueCause(context.aliases, model));
+      if (cause) fail(relativePath, stepModelUnavailableText(stepPath, own ? 'step' : 'defaults', `model alias "${model}"`, cause, 'unmapped'));
+    }
+  }
+
+  for (const relative of (await listFilesRecursive(path.join(repoDir, 'scorers'))).filter((file) => file.endsWith('.md') && file !== 'README.md').sort()) {
+    const relativePath = `scorers/${relative}`;
+    const content = await readText(path.join(repoDir, 'scorers', ...relative.split('/')));
+    const parsed = content === null ? undefined : parseScorer(relativePath, content);
+    const model = parsed?.ok ? parsed.definition.model : undefined;
+    if (!parsed?.ok || model === undefined) continue;
+    const cause = unmapped(readable, (context) => valueCause(context.aliases, model));
+    if (cause) fail(relativePath, scorerModelUnavailableText(parsed.definition.name, `model alias "${model}"`, cause, 'unmapped'));
+  }
+  return findings;
+}
+
 // ─── Engine ──────────────────────────────────────────────────────────────────
 
 /** Every check, in the order the reporter listed them. */
@@ -493,6 +629,7 @@ export async function reviewBranchDir(branch: string, repoDir: string): Promise<
     ...await formatFindings(resources, readText),
     ...await leakFindings(repoDir, resources, readText),
     ...await workflowFindings(repoDir),
+    ...await modelFindings(repoDir, resources, readText, roles, projects),
   ];
 
   const counts: Record<FindingLevel, number> = { fail: 0, warn: 0, info: 0 };
@@ -504,7 +641,7 @@ export async function reviewBranchDir(branch: string, repoDir: string): Promise<
 // ─── Read-only branch reader ─────────────────────────────────────────────────
 
 /** The repo roots read out of the branch; everything else is irrelevant here. */
-const READ_ROOTS = ['skills', 'rules', 'agents', 'manifest', 'workflows', 'prompts', 'scorers'];
+const READ_ROOTS = ['skills', 'rules', 'agents', 'manifest', 'workflows', 'prompts', 'scorers', 'models'];
 
 /**
  * The ref to read `branch` from: the name itself when it resolves locally, else

@@ -30,6 +30,7 @@ vi.mock('../utils/logger.js', () => {
   };
 });
 
+import { localAliasesPath } from '../models/aliases.js';
 import { reviewBranchDir, materializeRef, type BranchReview } from '../review-branch.js';
 
 const BRANCH = 'teamai/push/tester/20260101-000000';
@@ -506,6 +507,138 @@ describe('reviewBranchDir — scorers', () => {
     await writeScorer(repoDir, 'dev/quality.md', VALID_SCORER);
     await writeScorer(repoDir, 'ops/quality.md', VALID_SCORER);
     await writeWorkflow(repoDir, 'ship', 'schemaVersion: v1alpha1\nname: ship\ndescription: Ship it.\nsteps:\n  - id: plan\n    prompt: Plan it.\n    scorers: [quality]\n');
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.findings).toEqual([]);
+  });
+});
+
+describe('reviewBranchDir — model aliases', () => {
+  let repoDir: string;
+
+  beforeEach(async () => {
+    repoDir = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-review-models-'));
+  });
+
+  afterEach(async () => {
+    await fse.remove(repoDir);
+    await fse.remove(localAliasesPath());
+  });
+
+  const aliasesFile = (yaml: string) => fse.outputFile(path.join(repoDir, 'models', 'aliases.yaml'), yaml);
+  const modelFindings = (review: BranchReview) => review.findings.filter((finding) => finding.check === 'models');
+
+  it('fails an agent whose alias the branch maps for none of its target tools', async () => {
+    await aliasesFile('aliases:\n  fast:\n    codex: gpt-6-mini\n');
+    await fse.outputFile(path.join(repoDir, 'agents', 'reviewer.yaml'), 'name: reviewer\ndescription: Reviews code.\ninstructions: Review the code.\nmodel: fast\ntargets: [claude]\n');
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.ok).toBe(false);
+    expect(modelFindings(review)).toEqual([{
+      level: 'fail', check: 'models', path: 'agents/reviewer.yaml',
+      message: 'Agent "reviewer" asks for model alias "fast", which has no model for claude in models/aliases.yaml. Add one, or remove model from the agent.',
+    }]);
+  });
+
+  it('fails a workflow step, and the steps defaults.model reaches, whose alias the branch maps for no tool', async () => {
+    await writeWorkflow(repoDir, 'ship', [
+      'schemaVersion: v1alpha1', 'name: ship', 'description: Ship it.', 'defaults:', '  model: fast', 'steps:',
+      '  - id: plan', '    prompt: Plan it.', '    model: strong', '  - id: write', '    prompt: Write it.', '    needs: [plan]', '',
+    ].join('\n'));
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(modelFindings(review)).toEqual([
+      { level: 'fail', check: 'models', path: 'workflows/ship.yaml', message: 'Step "plan" asks for model alias "strong", which has no model for any tool in models/aliases.yaml. Add one or remove model from the step.' },
+      { level: 'fail', check: 'models', path: 'workflows/ship.yaml', message: 'Step "write" gets model alias "fast" from defaults, which has no model for any tool in models/aliases.yaml. Add one, or set model on the step.' },
+    ]);
+  });
+
+  it('fails a scorer whose alias the branch maps for no tool, judging the team files only', async () => {
+    await aliasesFile('aliases:\n  strong:\n    claude: opus\n');
+    await fse.outputFile(localAliasesPath(), 'aliases:\n  strong:\n    claude: ~\n  fast:\n    claude: haiku\n');
+    await writeScorer(repoDir, 'quality.md', VALID_SCORER.replace('passingScore: 1', 'passingScore: 1\nmodel: fast'));
+    await writeScorer(repoDir, 'tests.md', VALID_SCORER.replace('passingScore: 1', 'passingScore: 1\nmodel: strong'));
+    await writeScorer(repoDir, 'literal.md', VALID_SCORER.replace('passingScore: 1', 'passingScore: 1\nmodel: claude-haiku-4-5'));
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(modelFindings(review)).toEqual([{
+      level: 'fail', check: 'models', path: 'scorers/quality.md',
+      message: 'Scorer "quality" asks for model alias "fast", which has no model for any tool in models/aliases.yaml. Add one, or remove model from the scorer.',
+    }]);
+  });
+
+  it('fails a malformed aliases file with the words doctor uses', async () => {
+    await aliasesFile('aliases: [broken]\n');
+
+    const review = await reviewBranchDir(BRANCH, repoDir);
+
+    expect(review.ok).toBe(false);
+    expect(modelFindings(review)).toEqual([{
+      level: 'fail', check: 'models', path: 'models/aliases.yaml',
+      message: expect.stringMatching(/^Invalid model aliases file at models\/aliases\.yaml: .+\. Until that is fixed, pull keeps the deployed copies of every agent that sets a `model`/),
+    }]);
+  });
+
+  const roles = 'version: 1\nroles:\n  - id: dev\n    resources: { knowledge: [], skills: [], agents: [dev], models: [dev] }\n  - id: ops\n    resources: { knowledge: [], skills: [] }\n';
+  const agent = (model: string, extra = '') => `name: reviewer\ndescription: Reviews code.\ninstructions: Review the code.\nmodel: ${model}\ntargets: [claude]\n${extra}`;
+
+  it('checks a namespaced agent only for the roles that receive it, against the aliases those roles receive', async () => {
+    await fse.outputFile(path.join(repoDir, 'manifest', 'roles.yaml'), roles);
+    await fse.outputFile(path.join(repoDir, 'manifest', 'projects.yaml'), 'version: 1\nprojects:\n  - id: svc-a\n    name: Svc A\n    resources: { skills: [] }\n');
+    await fse.outputFile(path.join(repoDir, 'models', 'dev', 'aliases.yaml'), 'aliases:\n  fast:\n    claude: haiku\n');
+    await fse.outputFile(path.join(repoDir, 'agents', 'dev', 'reviewer.yaml'), agent('fast'));
+
+    expect(modelFindings(await reviewBranchDir(BRANCH, repoDir))).toEqual([]);
+
+    await fse.outputFile(path.join(repoDir, 'models', 'dev', 'aliases.yaml'), 'aliases:\n  fast:\n    codex: gpt-6-mini\n');
+    expect(modelFindings(await reviewBranchDir(BRANCH, repoDir))).toEqual([{
+      level: 'fail', check: 'models', path: 'agents/dev/reviewer.yaml',
+      message: 'Agent "reviewer" asks for model alias "fast", which has no model for claude in models/dev/aliases.yaml (role dev). Add one, or remove model from the agent.',
+    }]);
+  });
+
+  it('names the roles a shared agent\'s alias is unmapped for', async () => {
+    await fse.outputFile(path.join(repoDir, 'manifest', 'roles.yaml'), roles);
+    await fse.outputFile(path.join(repoDir, 'models', 'dev', 'aliases.yaml'), 'aliases:\n  fast:\n    claude: haiku\n');
+    await fse.outputFile(path.join(repoDir, 'agents', 'reviewer.yaml'), agent('fast'));
+
+    expect(modelFindings(await reviewBranchDir(BRANCH, repoDir))).toEqual([{
+      level: 'fail', check: 'models', path: 'agents/reviewer.yaml',
+      message: 'Agent "reviewer" asks for model alias "fast", which has no model for claude in models/aliases.yaml (no role or project, role ops). Add one, or remove model from the agent.',
+    }]);
+  });
+
+  it('checks defaults.model for a step whose agent sets no model, as a run would use it', async () => {
+    await fse.outputFile(path.join(repoDir, 'agents', 'reviewer.yaml'), 'name: reviewer\ndescription: Reviews code.\ninstructions: Review the code.\n');
+    await writeWorkflow(repoDir, 'ship', 'schemaVersion: v1alpha1\nname: ship\ndescription: Ship it.\ndefaults:\n  model: fast\nsteps:\n  - id: check\n    agent: reviewer\n    prompt: Review it.\n');
+
+    expect(modelFindings(await reviewBranchDir(BRANCH, repoDir))).toEqual([{
+      level: 'fail', check: 'models', path: 'workflows/ship.yaml',
+      message: 'Step "check" gets model alias "fast" from defaults, which has no model for any tool in models/aliases.yaml. Add one, or set model on the step.',
+    }]);
+
+    await fse.outputFile(path.join(repoDir, 'agents', 'reviewer.yaml'), agent('claude-haiku-4-5'));
+    expect(modelFindings(await reviewBranchDir(BRANCH, repoDir))).toEqual([]);
+  });
+
+  it('passes an agent whose tool extras name the model of each target tool', async () => {
+    await fse.outputFile(path.join(repoDir, 'agents', 'reviewer.yaml'), agent('fast', 'tool_extras:\n  claude:\n    model: haiku\n'));
+
+    expect(modelFindings(await reviewBranchDir(BRANCH, repoDir))).toEqual([]);
+
+    await fse.outputFile(path.join(repoDir, 'agents', 'reviewer.yaml'), agent('fast', 'tool_extras:\n  codex:\n    model: gpt-6-mini\n'));
+    expect(modelFindings(await reviewBranchDir(BRANCH, repoDir))).toEqual([expect.objectContaining({ path: 'agents/reviewer.yaml' })]);
+  });
+
+  it('passes aliases the branch maps and model names as they are', async () => {
+    await aliasesFile('aliases:\n  fast:\n    claude: haiku\n');
+    await fse.outputFile(path.join(repoDir, 'agents', 'reviewer.yaml'), 'name: reviewer\ndescription: Reviews code.\ninstructions: Review the code.\nmodel: fast\n');
+    await writeScorer(repoDir, 'quality.md', VALID_SCORER.replace('passingScore: 1', 'passingScore: 1\nmodel: fast'));
+    await writeScorer(repoDir, 'literal.md', VALID_SCORER.replace('passingScore: 1', 'passingScore: 1\nmodel: gpt-6-mini'));
 
     const review = await reviewBranchDir(BRANCH, repoDir);
 

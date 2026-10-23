@@ -38,7 +38,7 @@ export interface StepModelRequest {
   config: LocalConfig;
 }
 
-type ModelOrigin = 'step' | 'defaults';
+export type ModelOrigin = 'step' | 'defaults';
 
 /** What the member can do about a step model that gives the tool no model. */
 const NO_MODEL_FIX: Record<NoModel, Record<ModelOrigin, string>> = {
@@ -47,6 +47,15 @@ const NO_MODEL_FIX: Record<NoModel, Record<ModelOrigin, string>> = {
   switched: { step: 'Run teamai models restore, or remove model from the step.', defaults: 'Run teamai models restore, or set model on the step.' },
   unresolved: { step: 'Fix that, or remove model from the step.', defaults: 'Fix that, or set model on the step.' },
 };
+
+/**
+ * Why a step cannot run the model it asks for, or gets from `defaults`: `value` is `model alias "fast"` or `model "x"`,
+ * `cause` the `noModelCause` of its resolution.
+ */
+export function stepModelUnavailableText(step: string, origin: ModelOrigin, value: string, cause: string, reason: NoModel): string {
+  const asks = origin === 'step' ? `asks for ${value}` : `gets ${value} from defaults`;
+  return `Step "${step}" ${asks}, which ${cause}. ${NO_MODEL_FIX[reason][origin]}`;
+}
 
 function unavailable(message: string): StepModelChoice {
   return { ok: false, failure: { code: 'model_unavailable', message } };
@@ -67,8 +76,7 @@ export async function chooseStepModel(request: StepModelRequest): Promise<StepMo
   const resolution = resolveModelValue(aliases, chosen.value, tool);
   if (!resolution.ok || resolution.model === undefined) {
     const value = isModelAlias(aliases, chosen.value) ? `model alias "${chosen.value}"` : `model "${chosen.value}"`;
-    const asks = chosen.origin === 'step' ? `asks for ${value}` : `gets ${value} from defaults`;
-    return unavailable(`Step "${step}" ${asks}, which ${noModelCause(resolution, tool)}. ${NO_MODEL_FIX[noModelReason(resolution)][chosen.origin]}`);
+    return unavailable(stepModelUnavailableText(step, chosen.origin, value, noModelCause(resolution, tool), noModelReason(resolution)));
   }
   return {
     ok: true,

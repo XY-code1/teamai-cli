@@ -11,6 +11,11 @@ const ON_NO_MODEL = {
 
 const NO_MODEL_FIX = { unmapped: 'Add one, or remove model from the scorer.', unresolved: 'Fix that, or remove model from the scorer.' } as const;
 
+/** Why no judge can run a scorer's model: `asked` is `model alias "fast"` or `model "x"`, `cause` the `noModelCause` of its resolution. */
+export function scorerModelUnavailableText(scorer: string, asked: string, cause: string, reason: keyof typeof NO_MODEL_FIX): string {
+  return `Scorer "${scorer}" asks for ${asked}, which ${cause}. ${NO_MODEL_FIX[reason]}`;
+}
+
 /** CodeBuddy's judge launch passes no effort, so its judges run without an alias's. */
 const NO_EFFORT: ReadonlySet<string> = new Set(['codebuddy']);
 
@@ -48,13 +53,13 @@ export function chooseJudgeModel(aliases: ModelAliases, scorer: Pick<ScorerDefin
       return { ok: true, choice: { tool, ...policy, ...alias }, note: `Scorer "${scorer.name}" asks for ${asked}, which ${noModelCause(resolved, tool)}, so ${tool} judges with its default model.` };
     }
     if (reason === 'unresolved') {
-      return { ok: false, code: 'judge_model_unavailable', reason, message: `Scorer "${scorer.name}" asks for ${asked}, which ${noModelCause(resolved, tool)}. ${NO_MODEL_FIX.unresolved}` };
+      return { ok: false, code: 'judge_model_unavailable', reason, message: scorerModelUnavailableText(scorer.name, asked, noModelCause(resolved, tool), reason) };
     }
     unmapped.push(tool);
     unmappedBy = resolved;
   }
   return {
     ok: false, code: 'judge_model_unavailable', reason: 'unmapped',
-    message: `Scorer "${scorer.name}" asks for ${asked}, which ${noModelCause(unmappedBy, unmapped.join(', ') || 'any judge tool')}. ${NO_MODEL_FIX.unmapped}`,
+    message: scorerModelUnavailableText(scorer.name, asked, noModelCause(unmappedBy, unmapped.join(', ') || 'any judge tool'), 'unmapped'),
   };
 }

@@ -252,21 +252,18 @@ export function modelValueProblem(value: string | undefined): string | undefined
  * `strong` and `fast` resolve to no model field.
  */
 export async function loadModelAliases(localConfig: LocalConfig): Promise<ModelAliases> {
-  const team = await loadTeamAliases(localConfig);
+  const team = await loadTeamModelAliases(localConfig);
   if (!team.ok) return team;
+  const { names } = team;
   const localPath = localAliasesPath();
   const read = await readAliasesFile(localPath, localPath);
   const local = read.ok ? read : { aliases: new Map<string, AliasEntries>(), warnings: [] };
-  const names = new Set<string>([...RESERVED_ALIASES, ...team.names]);
   // Read once per load, and only matters for aliases: a literal model is written as is.
   const switches = await liveModelSwitches();
   // A local name no team here defines is another team's: it has no effect, so no warning either.
   const localHere = new Map([...local.aliases].filter(([alias]) => names.has(alias)));
   return {
-    ok: true,
-    names,
-    team: team.active,
-    inactive: team.inactive,
+    ...team,
     local: localHere,
     ...(read.ok ? {} : { localFailure: read.reason }),
     warnings: [
@@ -276,6 +273,21 @@ export async function loadModelAliases(localConfig: LocalConfig): Promise<ModelA
       ...[...localHere].flatMap(([alias, entries]) => droppedEffortWarnings(alias, entries, localPath)),
     ],
     switches,
+  };
+}
+
+/** The aliases the team files alone give, with no member override and no model switch, as `review --branch` checks them. */
+export async function loadTeamModelAliases(localConfig: LocalConfig): Promise<ModelAliases> {
+  const team = await loadTeamAliases(localConfig);
+  if (!team.ok) return team;
+  return {
+    ok: true,
+    names: new Set<string>([...RESERVED_ALIASES, ...team.names]),
+    team: team.active,
+    inactive: team.inactive,
+    local: new Map(),
+    warnings: team.warnings,
+    switches: {},
   };
 }
 
