@@ -6,6 +6,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GIT_AT_START_PAYLOAD_KEY } from '../dashboard-collector.js';
 import { CAPTURE_PAYLOAD_KEY, SessionCaptures } from '../session-flow/captures.js';
+import { saveScopeSelection } from '../scope-selection.js';
 import type { LocalConfig } from '../types.js';
 import { log } from '../utils/logger.js';
 import { commitFile, fakeClaude, git, initRepo, recordDelivery } from './helpers/delivered-checkout.js';
@@ -119,7 +120,7 @@ describe('session captures (#1178)', () => {
       agent: expect.objectContaining({
         tool: { name: 'claude' },
         model: { requested: 'claude-opus-5-5' },
-        team: { revision: rev, localChanges: false },
+        team: { revision: rev, localChanges: false, selection: { scope: 'project', additionalRoles: [] } },
         project: { commit: git(project, 'rev-parse', 'HEAD'), dirty: false },
         driver: 'session',
         fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -180,15 +181,74 @@ describe('session captures (#1178)', () => {
     await SessionCaptures.atStart(config, 'claude', start(project), {});
     await SessionCaptures.atStart(config, 'claude', start(project, { source: 'resume' }), {});
 
-    const unchanged = await SessionCaptures.checkoutRevision(config, 'claude');
+    const unchanged = await SessionCaptures.checkoutDelivery(config, 'claude');
     await SessionCaptures.markTeamChanged(config, 'claude', start(project), unchanged);
     expect((await SessionCaptures.read(config, 'claude-code', SESSION)).map((capture) => capture.teamChanged)).toEqual([undefined, undefined]);
 
-    const before = await SessionCaptures.checkoutRevision(config, 'claude');
+    const before = await SessionCaptures.checkoutDelivery(config, 'claude');
     await recordDelivery(config, { rev: commitFile(config.repo.localPath, 'skills/other/SKILL.md'), targets: ['claude'], files: [skill] });
     await SessionCaptures.markTeamChanged(config, 'claude', start(project), before);
     expect((await SessionCaptures.read(config, 'claude-code', SESSION)).map((capture) => capture.teamChanged)).toEqual([true, true]);
   });
+
+  it('gives two members on the same revision with different roles a different selection and fingerprint', async () => {
+    const { config, project, rev, skill } = checkout();
+    const teamOf = async (primaryRole: string) => {
+      const member = { ...config, primaryRole, dataHome: path.join(config.dataHome ?? '', primaryRole) };
+      await recordDelivery(member, { rev: rev.slice(0, 7), targets: ['claude'], files: [skill] });
+      await SessionCaptures.atStart(member, 'claude', start(project), {});
+      const [captured] = await SessionCaptures.read(member, 'claude-code', SESSION);
+      return captured?.agent;
+    };
+
+    const backend = await teamOf('backend');
+    const frontend = await teamOf('frontend');
+    expect([backend?.team?.selection?.primaryRole, frontend?.team?.selection?.primaryRole]).toEqual(['backend', 'frontend']);
+    expect(backend?.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(frontend?.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(backend?.fingerprint).not.toBe(frontend?.fingerprint);
+  });
+
+  it('keeps the selection of the last pull after the member changes roles without pulling', async () => {
+    const { config, project, rev, skill } = checkout();
+    const backend = { ...config, primaryRole: 'backend' };
+    await recordDelivery(backend, { rev: rev.slice(0, 7), targets: ['claude'], files: [skill] });
+    const frontend = { ...config, primaryRole: 'frontend' };
+    await saveScopeSelection(backend, frontend);
+
+    await SessionCaptures.atStart(frontend, 'claude', start(project), {});
+
+    const [captured] = await SessionCaptures.read(frontend, 'claude-code', SESSION);
+    expect(captured?.agent.team?.selection?.primaryRole).toBe('backend');
+  });
+
+  it('marks the captures teamChanged when the session\'s pull delivers the same revision for another selection', async () => {
+    const { config, project, rev, skill } = checkout();
+    const backend = { ...config, primaryRole: 'backend' };
+    await recordDelivery(backend, { rev: rev.slice(0, 7), targets: ['claude'], files: [skill] });
+    await SessionCaptures.atStart(backend, 'claude', start(project), {});
+
+    const before = await SessionCaptures.checkoutDelivery(backend, 'claude');
+    await recordDelivery({ ...config, primaryRole: 'frontend' }, { rev: rev.slice(0, 7), targets: ['claude'], files: [skill] });
+    await SessionCaptures.markTeamChanged(backend, 'claude', start(project), before);
+
+    expect((await SessionCaptures.read(backend, 'claude-code', SESSION)).map((capture) => capture.teamChanged)).toEqual([true]);
+  });
+
+  it('marks the captures teamChanged when the session\'s pull delivers the same revision for other workspace children', async () => {
+    const { config, project, rev, skill } = checkout();
+    await recordDelivery(config, { rev: rev.slice(0, 7), targets: ['claude'], files: [skill], children: 'children-before' });
+    await SessionCaptures.atStart(config, 'claude', start(project), {});
+
+    const before = await SessionCaptures.checkoutDelivery(config, 'claude');
+    await recordDelivery(config, { rev: rev.slice(0, 7), targets: ['claude'], files: [skill], children: 'children-after' });
+    await SessionCaptures.markTeamChanged(config, 'claude', start(project), before);
+
+    const captures = await SessionCaptures.read(config, 'claude-code', SESSION);
+    expect(captures.map((capture) => capture.teamChanged)).toEqual([true]);
+    expect(SessionCaptures.agentOf(captures, undefined)?.team).toBeUndefined();
+  });
+
   it('keeps both changes when another process rewrites the session\'s captures at the same time', async () => {
     const { config, project, rev, skill } = checkout();
     await recordDelivery(config, { rev: rev.slice(0, 7), targets: ['claude'], files: [skill] });
@@ -197,7 +257,7 @@ describe('session captures (#1178)', () => {
     const writer = stalledVersionWriter(path.dirname(project), config, { ...start(project), [CAPTURE_PAYLOAD_KEY]: captureId });
     await until(writer.stalled);
 
-    const before = await SessionCaptures.checkoutRevision(config, 'claude');
+    const before = await SessionCaptures.checkoutDelivery(config, 'claude');
     await recordDelivery(config, { rev: commitFile(config.repo.localPath, 'skills/other/SKILL.md'), targets: ['claude'], files: [skill] });
     const marked = SessionCaptures.markTeamChanged(config, 'claude', start(project), before);
     await Promise.race([marked, new Promise((resolve) => setTimeout(resolve, 1000))]);

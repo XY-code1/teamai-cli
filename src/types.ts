@@ -1012,6 +1012,21 @@ export type RecordedAgentModel = z.infer<typeof RecordedAgentModelSchema>;
 /** `RecordedAgentModel` by agent stem, then tool. */
 export type AgentModelRecords = Record<string, Record<string, RecordedAgentModel>>;
 
+/**
+ * The member's choices that decide which team assets a pull delivers (#1178), as that pull read them from
+ * `LocalConfig`. The lists are sorted, so the same choices compare equal however they were entered.
+ */
+export const DeliverySelectionSchema = z.object({
+  scope: InstallScopeSchema,
+  primaryRole: z.string().optional(),
+  additionalRoles: z.array(z.string()),
+  projects: z.array(z.string()).optional(),
+  subscribedTags: z.array(z.string()).optional(),
+  excludedSkills: z.array(z.string()).optional(),
+  inheritUserScope: z.boolean().optional(),
+});
+export type DeliverySelection = z.infer<typeof DeliverySelectionSchema>;
+
 export const StateSchema = z.object({
   lastPush: z.string().nullable().default(null),
   lastPull: z.string().nullable().default(null),
@@ -1082,6 +1097,8 @@ export const StateSchema = z.object({
     rootsSeeded: z.boolean().optional(),
     /** The children a workspace was last delivered with (`WorkspaceChildren.fingerprint`, #913). */
     children: z.string().optional(),
+    /** The selection the last pull that delivered into this checkout read. Absent in a record an older CLI wrote. */
+    selection: DeliverySelectionSchema.optional(),
     /**
      * The `claudeMdExcludes` entries teamai wrote into this checkout's
      * `.claude/settings.local.json` for the workspaces above it (#913).

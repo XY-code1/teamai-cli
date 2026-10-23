@@ -63,6 +63,8 @@ import {
   managedMcpWorkspaceId,
   SOURCE_PULL_TTL_MS,
   installScopeName,
+  DeliverySelectionSchema,
+  type DeliverySelection,
 } from './types.js';
 import type { CultureFrontmatter } from './types.js';
 import { deliversEveryNamespace } from './resource-namespaces.js';
@@ -1017,15 +1019,17 @@ export type TeamDelivery =
  * team delivery for `tool`, and its full commit in the team clone. It decides
  * both whether a workflow-launched session may skip its pull and whether a
  * pass records the team revision it ran with, so the two cannot drift
- * (#1176). Read-only, so never userScopeRecord.
+ * (#1176). Read-only, so never userScopeRecord. `beforeOwnPull` is a session
+ * start whose own pull follows and marks what it changes (#1178): a selection
+ * change still waiting for that pull leaves the checkout as delivered until then.
  */
-export async function teamDelivery(localConfig: LocalConfig, tool: string): Promise<TeamDelivery> {
+export async function teamDelivery(localConfig: LocalConfig, tool: string, options: { beforeOwnPull?: boolean } = {}): Promise<TeamDelivery> {
   const state = await loadStateForScope(localConfig);
   const key = await checkoutRecordKey(localConfig);
   const record = key ? state.lastPullByWorkspace?.[key] : undefined;
   const gap = (reason: DeliveryGap): TeamDelivery => ({ complete: false, key, ...(record ? { record } : {}), gap: reason });
   if (!key || !record) return gap('no_record');
-  if (state.lastPullRev === null) return gap('pending_full_sync');
+  if (state.lastPullRev === null && !options.beforeOwnPull) return gap('pending_full_sync');
   if (record.rev === FORCED_FULL_SYNC_REV) return gap('awaiting_full_sync');
   if (!record.delivered) return gap('no_baseline');
   if (!record.targets.includes(tool)) return gap('tool_not_delivered');
@@ -1095,6 +1099,19 @@ function setChildren(record: CheckoutRecord, localConfig: LocalConfig): void {
   if (localConfig.scope !== 'project') return;
   if (localConfig.children) record.children = localConfig.children.fingerprint;
   else delete record.children;
+}
+
+/** The selection `localConfig` makes a pull deliver for, as the checkout's record keeps it. */
+export function deliverySelection(localConfig: LocalConfig): DeliverySelection {
+  const { scope, primaryRole, additionalRoles, projects, subscribedTags, excludedSkills, inheritUserScope } = localConfig;
+  const lists = Object.entries({ projects, subscribedTags, excludedSkills }).flatMap(([key, values]) => values ? [[key, [...values].sort()]] : []);
+  return DeliverySelectionSchema.parse({
+    scope,
+    ...(primaryRole !== undefined ? { primaryRole } : {}),
+    additionalRoles: [...additionalRoles].sort(),
+    ...Object.fromEntries(lists),
+    ...(inheritUserScope !== undefined ? { inheritUserScope } : {}),
+  });
 }
 
 /** Put `agentModels` on `record`, leaving the key out while there are none. */
@@ -2354,6 +2371,7 @@ async function pullForScope(
       if (localConfig.scope === 'project' && localConfig.projectRoot) record.root = localConfig.projectRoot;
       if (rootsSeeded) record.rootsSeeded = true;
       setChildren(record, localConfig);
+      record.selection = deliverySelection(localConfig);
       addPushBaseRev(record, deliveredRev);
       record.delivered = ledger.hashes;
       record.skillDirs = syncedSkillDirs;
@@ -2399,6 +2417,7 @@ async function pullForScope(
         ...(claudeMdExcludes ? { claudeMdExcludes } : {}),
       };
       setChildren(record, localConfig);
+      record.selection = deliverySelection(localConfig);
       setAgentModels(record, ledger.agentModels);
       state.lastPullByWorkspace = {
         ...others,

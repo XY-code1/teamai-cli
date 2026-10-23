@@ -302,7 +302,8 @@ describe('pull reports what reached the tool directory (#585)', () => {
     // And what it delivered there, for teamai's git exclude block (#915): nothing here.
     // And that its tool roots were seeded, once (#1041).
     // And each tool's skills directories and session tools' homes (#1221): no tool takes skills here.
-    expect(state.lastPullByWorkspace?.[key]).toEqual({ rev: 'old1234', root: projectRoot, targets: [], pushBaseRevs: ['abc1234'], delivered: {}, gitExcludePaths: {}, skillDirs: {}, sessionToolHomes: {}, rootsSeeded: true });
+    // And the selection it delivered for (#1178).
+    expect(state.lastPullByWorkspace?.[key]).toEqual({ rev: 'old1234', root: projectRoot, targets: [], pushBaseRevs: ['abc1234'], delivered: {}, gitExcludePaths: {}, skillDirs: {}, sessionToolHomes: {}, rootsSeeded: true, selection: { scope: 'project', additionalRoles: [] } });
   });
 
   it.each(['empty', 'missing'])('prunes only stale empty directories when the team bundle is %s', async (state) => {

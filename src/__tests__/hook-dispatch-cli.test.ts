@@ -346,7 +346,7 @@ describe('hookDispatchCli', () => {
     try {
       await hookDispatchCli('session-start', 'claude', '*', { stdinFile });
       expect(capturedFirst).toEqual([`${JSON.parse(detachedPayload).teamai_capture}.json`]);
-      expect(JSON.parse(fs.readFileSync(path.join(capturesDir, capturedFirst[0] ?? ''), 'utf8')).agent.team).toEqual({ revision: rev, localChanges: false });
+      expect(JSON.parse(fs.readFileSync(path.join(capturesDir, capturedFirst[0] ?? ''), 'utf8')).agent.team).toMatchObject({ revision: rev, localChanges: false });
       const { agent } = JSON.parse(fs.readFileSync(path.join(capturesDir, capturedFirst[0] ?? ''), 'utf8'));
       expect(JSON.parse(detachedPayload).teamai_git_at_start).toEqual({ head: agent.project.commit, dirty: agent.project.dirty });
     } finally {

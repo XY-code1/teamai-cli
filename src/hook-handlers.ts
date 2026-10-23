@@ -146,9 +146,9 @@ const pullHandler: HookHandler = {
     }
     const { pull } = await import('./pull.js');
     const { SessionCaptures } = await import('./session-flow/captures.js');
-    const before = config ? await SessionCaptures.checkoutRevision(config, tool) : undefined;
+    const before = config && await SessionCaptures.checkoutDelivery(config, tool);
     await pull({ silent: true });
-    if (config) await SessionCaptures.markTeamChanged(config, tool, stdin, before);
+    if (config && before) await SessionCaptures.markTeamChanged(config, tool, stdin, before);
     await packageHints.stashPackageHintAfterPull(
       hintCwd,
       deriveSessionId(stdin, { includeCwd: true }),

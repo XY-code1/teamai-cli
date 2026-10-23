@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { AgentObservationSchema, observeCheckout, settleObservation, type AgentObservation } from '../agent-observation.js';
 import { getAgentVersion } from '../agent-version.js';
-import { getDataHome, type LocalConfig } from '../types.js';
+import { getDataHome, type DeliverySelection, type LocalConfig } from '../types.js';
 import { acquireLock, releaseLock } from '../update.js';
 import { log } from '../utils/logger.js';
 import { AgentSession } from './agent-session.js';
@@ -59,7 +59,7 @@ async function atStart(config: LocalConfig, tool: string, payload: Record<string
     const model = typeof payload.model === 'string' ? { requested: payload.model } : undefined;
     const { gitStateIn } = await import('../dashboard-collector.js');
     const head = gitStateIn(payload);
-    const reported = await observeCheckout({ config, tool, cwd, ...(head !== undefined ? { head } : {}) });
+    const reported = await observeCheckout({ config, tool, cwd, beforeOwnPull: true, ...(head !== undefined ? { head } : {}) });
     const agent = settleObservation({ agent: { ...reported, ...(model ? { model } : {}) }, tool, driver: { kind: 'session' } }, undefined);
     if (!agent) return undefined;
     const file = payload.transcript_path;
@@ -123,18 +123,25 @@ async function addToolVersion(config: LocalConfig, tool: string, payload: Record
   }
 }
 
-/** The revision the pull record of the checkout `config`'s pulls deliver into names for `tool`, if any. */
-async function checkoutRevision(config: LocalConfig, tool: string): Promise<string | undefined> {
+/** What a checkout's pull record says the checkout holds. */
+type CheckoutDelivery = { rev?: string; selection?: DeliverySelection; children?: string };
+
+/** What the pull record of the checkout `config`'s pulls deliver into says it holds. */
+async function checkoutDelivery(config: LocalConfig, tool: string): Promise<CheckoutDelivery> {
   const { teamDelivery } = await import('../pull.js');
-  return (await teamDelivery(config, tool).catch(() => undefined))?.record?.rev;
+  const record = (await teamDelivery(config, tool).catch(() => undefined))?.record;
+  return { rev: record?.rev, selection: record?.selection, children: record?.children };
 }
 
-/** After the session's own pull: marks its captures when that pull moved the checkout off the revision it had `before`. */
-async function markTeamChanged(config: LocalConfig, tool: string, payload: Record<string, unknown>, before: string | undefined): Promise<void> {
+/**
+ * After the session's own pull: marks its captures when that pull delivered another revision, or the same one for
+ * another selection or other workspace children, than the checkout held `before` it.
+ */
+async function markTeamChanged(config: LocalConfig, tool: string, payload: Record<string, unknown>, before: CheckoutDelivery): Promise<void> {
   const platform = AgentSession.platformForTool(tool);
   const sessionId = payload.session_id;
   if (!platform || typeof sessionId !== 'string' || !SEGMENT.test(sessionId)) return;
-  if (await checkoutRevision(config, tool) === before) return;
+  if (isDeepStrictEqual(await checkoutDelivery(config, tool), before)) return;
   try {
     await rewrite(config, platform, sessionId, () => true, (capture) => ({ ...capture, teamChanged: true }));
   } catch (e) {
@@ -211,4 +218,4 @@ function agentOf(captures: readonly SessionCapture[], reportedModel: string | un
   return settled && { ...settled, teamai };
 }
 
-export const SessionCaptures = { atStart, addToolVersion, checkoutRevision, markTeamChanged, read, platformsOf, agentOf, sweep } as const;
+export const SessionCaptures = { atStart, addToolVersion, checkoutDelivery, markTeamChanged, read, platformsOf, agentOf, sweep } as const;

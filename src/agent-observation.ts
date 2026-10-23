@@ -16,7 +16,7 @@ import { z } from 'zod';
 import { getAgentVersion } from './agent-version.js';
 import { getCurrentVersion } from './package-info.js';
 import { recordedUnchanged } from './resources/delivered-copies.js';
-import type { LocalConfig } from './types.js';
+import { DeliverySelectionSchema, type LocalConfig } from './types.js';
 import { getHeadState, type HeadState } from './utils/git.js';
 
 /**
@@ -30,6 +30,8 @@ const LABEL = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,79}$/;
 const COMMIT = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 const Name = z.string().regex(NAME);
+/** What the checkout was delivered for: the pull's `DeliverySelection`, and the workspace children it kept (#913). */
+const Selection = DeliverySelectionSchema.extend({ children: z.string().optional() });
 const Label = z.string().regex(LABEL);
 const Applied = z.enum(['main', 'prompt', 'subagent']);
 
@@ -46,7 +48,7 @@ export const AgentObservationSchema = z.object({
   tool: z.object({ name: Label, version: Label.optional() }),
   model: ObservedModelSchema.optional(),
   effort: ObservedEffortSchema.optional(),
-  team: z.object({ revision: z.string().regex(COMMIT), localChanges: z.boolean() }).optional(),
+  team: z.object({ revision: z.string().regex(COMMIT), localChanges: z.boolean(), selection: Selection.optional() }).optional(),
   project: z.object({ commit: z.string().regex(COMMIT), dirty: z.boolean() }).optional(),
   teamai: z.string(),
   driver: z.string(),
@@ -65,7 +67,7 @@ const ReportedAgentSchema = z.object({
   tool: z.object({ name: z.string().optional(), version: z.string().optional() }).optional(),
   model: z.object({ requested: z.string().optional(), reported: z.string().optional(), alias: z.string().optional() }).optional(),
   effort: z.object({ requested: z.string().optional(), reported: z.string().optional() }).optional(),
-  team: z.object({ revision: z.string(), localChanges: z.boolean() }).optional(),
+  team: z.object({ revision: z.string(), localChanges: z.boolean(), selection: Selection.optional() }).optional(),
   project: z.object({ commit: z.string(), dirty: z.boolean() }).optional(),
 });
 export type ReportedAgent = z.infer<typeof ReportedAgentSchema>;
@@ -101,6 +103,8 @@ export type ToolLaunch = {
   };
   /** The model the step or its `defaults.model` chose, which the launch passes on argv in place of the definition's. */
   chosen?: { model: string; effort?: string; alias?: string };
+  /** A session start whose own pull follows and marks what it changes (`teamDelivery`). */
+  beforeOwnPull?: boolean;
   /** The checkout's git state when the launch already read it, null when it found none; read here otherwise. */
   head?: HeadState | null;
 };
@@ -115,7 +119,7 @@ export async function observeLaunch(launch: ToolLaunch): Promise<ReportedAgent> 
 export async function observeCheckout(launch: ToolLaunch): Promise<ReportedAgent> {
   const { teamDelivery } = await import('./pull.js');
   const [delivery, head] = await Promise.all([
-    teamDelivery(launch.config, launch.tool).catch(() => undefined),
+    teamDelivery(launch.config, launch.tool, { beforeOwnPull: launch.beforeOwnPull }).catch(() => undefined),
     launch.head !== undefined ? launch.head : getHeadState(launch.cwd).catch(() => null),
   ]);
   const record = delivery?.record;
@@ -133,8 +137,14 @@ export async function observeCheckout(launch: ToolLaunch): Promise<ReportedAgent
   // The effort requested is the one the launch passes on argv. Claude does not apply an agent file's `effort:` under
   // `--agent`, so the file's value is not what ran.
   const effort = names({ requested: chosen ? chosen.effort : definition?.effort }, LABEL);
-  const team = delivery?.complete
-    ? { revision: delivery.commit, localChanges: !await allUnchanged(delivery.record.delivered ?? {}) }
+  // A record an older CLI wrote does not say what it was delivered for, so it names no team.
+  const selection = delivery?.complete ? delivery.record.selection : undefined;
+  const team = delivery?.complete && selection
+    ? {
+      revision: delivery.commit,
+      localChanges: !await allUnchanged(delivery.record.delivered ?? {}),
+      selection: { ...selection, ...(delivery.record.children ? { children: delivery.record.children } : {}) },
+    }
     : undefined;
   return {
     ...(model ? { model } : {}),
