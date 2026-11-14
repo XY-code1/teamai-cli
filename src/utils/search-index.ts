@@ -35,6 +35,7 @@ import type { ConfidenceFactors } from '../maintenance/confidence.js';
 import { parseYaml } from './yaml.js';
 import { TeamSkillSource } from '../resources/team-skill-source.js';
 import { RESOURCE_LAYOUTS } from '../resources/resolver.js';
+import { RECALL_TRACE_ENV } from '../recall-provenance.js';
 
 /**
  * After this checkout's index is rebuilt by a pull. Self mode keeps one index
@@ -1154,9 +1155,11 @@ export async function indexInMemory(opts: BuildIndexOptions): Promise<SearchInde
   const revision = async (dir: string) => createGit(dir).raw([...HEAD_STATUS, '--untracked-files=normal'])
     .then(headStateOf, () => null);
 
+  const traceProvenance = process.env[RECALL_TRACE_ENV] === '1';
+
   const revisions = async () => Promise.all([
-    config && config.repo.kind !== 'http' ? revision(config.repo.localPath) : null,
-    branch && branchRoot && learningsDirs.includes(branchRoot) && await pathExists(path.join(branch, '.git')) ? revision(branch) : null,
+    traceProvenance && config && config.repo.kind !== 'http' ? revision(config.repo.localPath) : null,
+    traceProvenance && branch && branchRoot && learningsDirs.includes(branchRoot) && await pathExists(path.join(branch, '.git')) ? revision(branch) : null,
   ]);
 
   const [teamBefore, learningsBefore] = await revisions();
@@ -1247,7 +1250,7 @@ export async function indexInMemory(opts: BuildIndexOptions): Promise<SearchInde
 
   if (opts.children) index.children = opts.children;
 
-  if (config && reads.unreadable.length === 0 && opts.skills?.kind !== 'keep-indexed') {
+  if (traceProvenance && config && reads.unreadable.length === 0 && opts.skills?.kind !== 'keep-indexed') {
     const [teamAfter, learningsAfter] = await revisions();
 
     const stable = (before: typeof teamBefore, after: typeof teamAfter): string | undefined =>
