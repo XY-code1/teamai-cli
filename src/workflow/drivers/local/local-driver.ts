@@ -29,7 +29,8 @@ import {
   type LocalToolResult,
   type LocalToolRun,
 } from './local-tool-adapter.js';
-import { attemptDir, AttemptIdSchema, attemptResultPath, attemptsDir, readRun, RunIdSchema, updateRun, withRunLock, type RunId, type RunLock } from '../../store.js';
+import { attemptDir, AttemptIdSchema, attemptResultPath, attemptsDir, readRun, RunIdSchema, runScratchDir, updateRun, withRunLock, type RunId, type RunLock } from '../../store.js';
+import { readRecallObservation, RECALL_TRACE_ENV } from '../../../recall-provenance.js';
 import { abandonPlace, cloneDelivery, cloneHead, placeLeaseOf, placeOf, placeRoot, preparedClone, preparePlace, cloneRoleProblem, refuseDirtyAdoptedCommand, roleNotDeliveredFailure, runPlaceSetup, sweepClones, worktreeRoleProblem, type StepEnd } from '../../place/place.js';
 import { commandEnd, managedReport, StartedRunSchema, unreadablePlace, type StartedRun } from '../../protocol.js';
 import { memberTools, type MemberTool } from '../../../tool-launch/member-tools.js';
@@ -578,6 +579,7 @@ async function promptReport(
   const endsAtTurns = limits?.maxTurns !== undefined && !lease.interactive && family === 'claude' ? limits.maxTurns : undefined;
   const budget = limits?.budget !== undefined && (family === 'claude' || family === 'opencode') ? limits.budget.tokens : undefined;
   const launchedAt = Date.now();
+  const traceRecall = prepared?.install?.recallEnabled === true;
 
   if (lease.interactive) log.info(`Step "${lease.step}" opens ${launched} here for interactive work.`);
 
@@ -587,13 +589,17 @@ async function promptReport(
 
   if (homeEnv.kind === 'home_gone') return giveUp({ code: 'tool_unavailable', message: homeEnv.message }, launched);
 
+  const env: NodeJS.ProcessEnv = { ...inherited, ...homeEnv.env, ...lease.env, ...attemptEnv(config, lock.run, lease.attempt, mode) };
+
+  if (traceRecall) env[RECALL_TRACE_ENV] = '1';
+
   const input: LocalToolRun = {
     prompt: lease.prompt!,
     cwd,
     resultPath: resultFile,
     secrets,
     // The lease `env` is set over the step's environment, as a command's is.
-    env: { ...inherited, ...homeEnv.env, ...lease.env, ...attemptEnv(config, lock.run, lease.attempt, mode) },
+    env,
   };
 
   if (lease.output) input.output = lease.output;
@@ -662,6 +668,12 @@ async function promptReport(
 
   // How the definition was handed over is known only once the launch resolved its tool: OpenCode's depends on its major.
   if (ran) body.agent = ran.applied ? { ...observed, definition: { applied: ran.applied } } : observed;
+
+  if (ran && body.agent && traceRecall) {
+    const recall = await readRecallObservation(runScratchDir(config, lock.run), lease.attempt).catch(() => undefined);
+
+    if (recall) body.agent.recall = recall;
+  }
 
   if (used) body.used = used;
 
