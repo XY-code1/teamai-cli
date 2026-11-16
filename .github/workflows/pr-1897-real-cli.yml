@@ -1,0 +1,75 @@
+name: PR 1897 real CLI verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Branch or SHA to verify
+        required: true
+        default: fix/workflow-score-not-planned
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install supported Claude Code CLI
+        run: npm install --global @anthropic-ai/claude-code@2.1.308
+      - name: Real CLI world
+        shell: bash
+        run: |
+          set -euxo pipefail
+          claude --version
+          RUN=$(npm run -s verify:world)
+          echo "VERIFY_RUN=$RUN" | tee verification.env
+          npm run -s verify -- doctor "$RUN"
+          npm run -s verify -- teamai "$RUN" init https://teamai.test/team/repo.git --provider git --agent claude
+          npm run -s verify -- sh "$RUN" bash -lc 'cd .teamai/team-repo && mkdir -p workflows scorers && cat > workflows/review.yaml <<"YAML"
+          schemaVersion: v1alpha1
+          name: review
+          description: Review a change
+          invoke: allow
+          steps:
+            - id: review
+              prompt: Review the current change.
+              scorers: [review-quality]
+          YAML
+          cat > scorers/review-quality.md <<"MD"
+          ---
+          labels:
+            - { value: thorough, score: 1, description: Did the work it was asked for }
+            - { value: shallow, score: 0, description: Did not }
+          passingScore: 0.5
+          samplingRate: 0
+          ---
+          Judge the review.
+          MD
+          git add workflows/review.yaml scorers/review-quality.md
+          git -c user.name=verify -c user.email=verify@example.test commit -m "add verification workflow"
+          git push origin HEAD:main'
+          npm run -s verify -- teamai "$RUN" pull
+          npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow start --describe review --driver skill --tools default=claude | tee describe.log
+          npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow start review --driver skill --tools default=claude | tee start.log
+          cat start.log
+          npm run -s verify -- dir "$RUN"
+          echo "$RUN" > verify-run.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr-1897-verification
+          path: |
+            verification.env
+            describe.log
+            start.log
+            verify-run.txt
