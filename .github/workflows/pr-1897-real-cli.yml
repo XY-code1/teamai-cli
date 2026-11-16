@@ -60,9 +60,26 @@ jobs:
           git push origin HEAD:main'
           npm run -s verify -- teamai "$RUN" pull
           npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow start --describe review --driver skill --tools default=claude | tee describe.log
-          npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow start review --driver skill --tools default=claude | tee start.log
-          cat start.log
-          npm run -s verify -- dir "$RUN"
+          START=$(npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow start review --driver skill --tools default=claude)
+          printf '%s\n' "$START" | tee start.log record.log
+          RUN_ID=$(printf '%s' "$START" | jq -r '.data.turn.run')
+          CHOOSE=$(npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow next "$RUN_ID" --driver skill --choice h4)
+          printf '%s\n' "$CHOOSE" | tee choose.log -a record.log
+          ATTEMPT=$(printf '%s' "$CHOOSE" | jq -r '.data.turn.actions[] | select(.kind == "dispatch") | .attempt' | head -1)
+          test -n "$ATTEMPT" -a "$ATTEMPT" != null
+          REPORT=$(npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow report "$RUN_ID" --driver skill --attempt "$ATTEMPT")
+          printf '%s\n' "$REPORT" | tee report.log -a record.log
+          for i in $(seq 1 10); do
+            TURN=$(npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow next "$RUN_ID" --driver skill --wait)
+            printf '%s\n' "$TURN" | tee -a record.log
+            printf '%s' "$TURN" | grep -q '"code":"not_planned"' && break
+          done
+          grep -q '"kind":"judging"' record.log
+          grep -q '"kind":"judged"' record.log
+          grep -q '"code":"not_planned"' record.log
+          npm run -s verify -- ledger "$RUN" | tee ledger.log
+          tail -n 1 ledger.log
+          npm run -s verify -- cleanup "$RUN"
           echo "$RUN" > verify-run.txt
       - uses: actions/upload-artifact@v4
         if: always()
@@ -72,5 +89,10 @@ jobs:
             verification.env
             describe.log
             start.log
+            choose.log
+            report.log
+            record.log
+            ledger.log
             verify-run.txt
+
 
