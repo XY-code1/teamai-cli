@@ -67,7 +67,7 @@ jobs:
           printf '%s\n' "$CHOOSE" | tee choose.log -a record.log
           ATTEMPT=$(printf '%s' "$CHOOSE" | jq -r '.data.turn.actions[] | select(.kind == "dispatch") | .attempt' | head -1)
           test -n "$ATTEMPT" -a "$ATTEMPT" != null
-          npm run -s verify -- sh "$RUN" bash -lc "ATTEMPT_DIR=\$(find \"\$HOME/.teamai/projects\" -type d -path '*/workflows/runs/$RUN_ID/attempts/$ATTEMPT' -print -quit); test -n \"\$ATTEMPT_DIR\"; mkdir -p \"\$ATTEMPT_DIR/out\"; printf '%s\n' '{\"output\":{}}' > \"\$ATTEMPT_DIR/out/result.json\""
+          npm run -s verify -- sh "$RUN" bash -lc "ATTEMPT_DIR=\$(find \"\$HOME/.teamai/projects\" -type d -path '*/workflows/runs/$RUN_ID/attempts/$ATTEMPT' -print -quit); test -n \"\$ATTEMPT_DIR\"; mkdir -p \"\$ATTEMPT_DIR/out\"; printf '%s\n' '{\"kind\":\"output\",\"output\":{}}' > \"\$ATTEMPT_DIR/out/result.json\""
           npm run -s verify -- sh "$RUN" bash -lc "env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow report '$RUN_ID' --driver skill --attempt '$ATTEMPT' > /tmp/report.log 2>&1 &"
           sleep 3
           npm run -s verify -- sh "$RUN" cat /tmp/report.log | tee report.log -a record.log || true
