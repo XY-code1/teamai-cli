@@ -35,7 +35,7 @@ jobs:
           echo "VERIFY_RUN=$RUN" | tee verification.env
           npm run -s verify -- doctor "$RUN"
           npm run -s verify -- teamai "$RUN" init https://teamai.test/team/repo.git --provider git --agent claude
-          npm run -s verify -- sh "$RUN" bash -lc 'cd .teamai/team-repo && mkdir -p workflows scorers && cat > workflows/review.yaml <<"YAML"
+          npm run -s verify -- sh "$RUN" bash -lc 'TEAM_REPO=$(find "$HOME/.teamai/projects" -type d -name team-repo -print -quit); test -n "$TEAM_REPO"; cd "$TEAM_REPO"; mkdir -p workflows scorers && cat > workflows/review.yaml <<"YAML"
           schemaVersion: v1alpha1
           name: review
           description: Review a change
@@ -73,3 +73,4 @@ jobs:
             describe.log
             start.log
             verify-run.txt
+
