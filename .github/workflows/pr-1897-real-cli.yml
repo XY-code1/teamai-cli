@@ -80,22 +80,17 @@ jobs:
           grep -q '"kind":"judging"' record.log
           grep -q '"kind":"judged"' record.log
           grep -q '"code":"not_planned"' record.log
-          npm run -s verify -- ledger "$RUN" | tee ledger.log
-          tail -n 1 ledger.log
+          mkdir -p /tmp/pr-1897-verification
+          cp verification.env describe.log start.log choose.log report.log record.log /tmp/pr-1897-verification/
+          rm verification.env describe.log start.log choose.log report.log record.log
+          npm run -s verify -- ledger "$RUN" | tee /tmp/pr-1897-verification/ledger.log
+          tail -n 1 /tmp/pr-1897-verification/ledger.log
           npm run -s verify -- cleanup "$RUN"
-          echo "$RUN" > verify-run.txt
+          echo "$RUN" > /tmp/pr-1897-verification/verify-run.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: pr-1897-verification
-          path: |
-            verification.env
-            describe.log
-            start.log
-            choose.log
-            report.log
-            record.log
-            ledger.log
-            verify-run.txt
+          path: /tmp/pr-1897-verification
 
 
