@@ -71,7 +71,8 @@ jobs:
           sleep 3
           npm run -s verify -- sh "$RUN" cat /tmp/report.log | tee report.log -a record.log || true
           for i in $(seq 1 10); do
-            TURN=$(npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow next "$RUN_ID" --driver skill --wait)
+            sleep 2
+            TURN=$(npm run -s verify -- sh "$RUN" env CLAUDE_CODE_SESSION_ID=verify-session teamai workflow next "$RUN_ID" --driver skill)
             printf '%s\n' "$TURN" | tee -a record.log
             printf '%s' "$TURN" | grep -q '"code":"not_planned"' && break
           done
