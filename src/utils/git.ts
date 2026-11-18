@@ -6,7 +6,7 @@ import { realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import fse from 'fs-extra';
-import { copyRegularTree, openRegularFileSync, readRegularFile } from '@teamai/shared/regular-file';
+import { copyRegularTree, openRegularFileSync, readRegularFile, writeRegularFile } from '@teamai/shared/regular-file';
 import { GitError, simpleGit, type SimpleGit, type SimpleGitOptions, type outputHandler } from 'simple-git';
 import { z } from 'zod';
 import { execCommand } from '@teamai/shared/exec';
@@ -772,20 +772,24 @@ export async function commitPaths(
   ])).split('\0').filter(Boolean);
 
   if (staged.length === 0) return false;
+
   // A path-limited commit leaves the rest of the user's index intact, including
   // partially staged files. Use literal, NUL-delimited names from the index.
   const editMessage = path.resolve(localPath, (await git.raw(['rev-parse', '--git-path', 'COMMIT_EDITMSG'])).trimEnd());
-  const original = await fs.promises.readFile(editMessage).catch((error: unknown) => {
-    if (errnoCode(error) === 'ENOENT') return undefined;
-    throw error;
-  });
+  let original: Buffer | undefined;
+
+  try {
+    original = await readRegularFile(editMessage);
+  } catch (error) {
+    if (errnoCode(error) !== 'ENOENT') throw error;
+  }
 
   // Keep normal commit hooks without leaving Git's generated message in the user's checkout.
   try {
     await git.raw(['--literal-pathspecs', 'commit', '--only', '-m', message, '--', ...staged]);
   } finally {
     if (original === undefined) await fs.promises.rm(editMessage, { force: true });
-    else await fs.promises.writeFile(editMessage, original);
+    else await writeRegularFile(editMessage, original);
   }
 
   return true;
